@@ -1,0 +1,846 @@
+openapi: 3.0.3
+
+info:
+  title: Módulo de Integración de Servicios de Ensamble
+  version: "2.1.0-borrador"
+  description: >
+    Contrato de la API del sistema de Ensambles: recepción de eventos de origen,
+    consulta de trazabilidad, y comunicación asíncrona entre el Orquestador
+    (único con acceso a base de datos) y el microservicio de Comunicación
+    con UnoGroup (sin estado propio — recibe el contenido completo y reporta
+    el resultado por separado).
+
+    Los endpoints se agrupan en tres categorías (tags):
+      - `ingesta`: recibe eventos de los sistemas de origen (WMS, Guías Manuales,
+        Tracking). No es un contrato de negocio en el sentido tradicional — el
+        formato lo define el mecanismo de mensajería, no un consumidor humano.
+      - `publico`: contrato externo real, para cualquier consumidor autorizado.
+      - `interno`: comunicación exclusivamente entre los propios microservicios
+        del sistema. No debe exponerse fuera de la red interna.
+
+servers:
+  - url: https://TBD.siman.com
+    description: URL definitiva pendiente de confirmar
+
+tags:
+  - name: ingesta
+    description: Recepción de eventos desde los sistemas de origen.
+  - name: publico
+    description: Contrato externo del sistema de Ensambles.
+  - name: interno
+    description: Comunicación entre los microservicios del propio sistema.
+
+paths:
+
+  # ============================================================
+  # INGESTA — receptor único de eventos de origen
+  # ============================================================
+  /internal/eventos:
+    post:
+      tags: [ingesta]
+      operationId: recibirEventoPubSub
+      summary: Receptor único de eventos de origen
+      description: >
+        Punto de entrada único del sistema. Recibe la creación y actualización
+        de solicitudes de ensamble desde cuatro sistemas de origen distintos:
+          - Creación de órdenes de armado a domicilio o en centro de distribución.
+            El evento de WMS es mínimo (`whseId` + `externOrderKey`) — el
+            Orquestador siempre consulta `GET /wms/dw/v1/shipment/get-shipment/
+            {whseId}/{externOrderKey}` para obtener los datos de negocio y
+            determinar, por línea, si cada ítem es ASSE, ENSA, o no requiere
+            ensamble (vía `orderdetails[].ext_udf_str10`). El flujo (ASSE/ENSA)
+            se determina por línea dentro del Orquestador, no al momento de
+            publicar — ver EventoWmsCrear más abajo.
+          - Actualizaciones de esas mismas órdenes conforme avanzan (alistamiento,
+            despacho). El atributo `tipo_evento` del mensaje distingue cuál de
+            las dos es, con el código nativo del sistema de origen. Los payloads
+            crudos de UP05/UP06 (`WmsUP05Payload`/`WmsUP06Payload`) solo sirven
+            como disparador — de ellos se extrae `whseId`+`externOrderKey` (por
+            cada orden dentro de `Head[]`, en el caso de UP06) y se repite la
+            misma consulta al shipment.
+          - Creación y actualización de órdenes de armado/desarmado generadas
+            manualmente en tienda o a través de guías (flujo CARM/TARM/DARM).
+          - Notificaciones de entrega al cliente. ⚠ El formato exacto de este
+            mensaje todavía no está definido.
+
+        El contenido de cada evento viaja codificado en base64 dentro de
+        `message.data`. El schema real, una vez decodificado, depende de
+        `origen` + `tipo_evento`: para `origen=wms`, `EventoWmsCrear`
+        (creación) o `WmsUP05Payload`/`WmsUP06Payload` (actualización, según
+        `tipo_evento`); para `origen=guias`, `EventoGuias` (comparte un único
+        schema entre CARM/TARM/DARM — un solo evento por orden, con todos los
+        SKUs en `items[]`; el Orquestador hace el fan-out a sub-órdenes). Esta
+        especificación no puede validar automáticamente esa correspondencia
+        entre atributo y contenido — es una limitación del formato de
+        mensajería subyacente, no una omisión de este contrato. La
+        validación real ocurre del lado del receptor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PubSubPushEnvelope'
+      responses:
+        '200':
+          description: >
+            Evento recibido y registrado. Confirma únicamente que la solicitud
+            quedó registrada para procesamiento — el enriquecimiento de datos y
+            el envío al partner de ensamble ocurren de forma asíncrona después.
+        '400':
+          description: Mensaje malformado, o atributos de ruteo (origen/flujo) ausentes o inválidos.
+        '5XX':
+          description: >
+            Error al procesar el evento. El mecanismo de entrega reintentará
+            según su propia política; los eventos que agoten reintentos se
+            retienen aparte para revisión manual.
+
+  # ============================================================
+  # PÚBLICO — trazabilidad
+  # ============================================================
+  /solicitudes/{ordenId}:
+    get:
+      tags: [publico]
+      operationId: consultarTrazabilidad
+      summary: Estado de todas las sub-órdenes bajo un ordenId
+      description: >
+        Devuelve el estado completo de una solicitud de ensamble, incluyendo
+        todas sus sub-órdenes (una por SKU) y el punto del proceso en el que
+        se encuentra cada una — desde su recepción hasta la confirmación (o
+        rechazo) por parte del partner de ensamble.
+      parameters:
+        - name: ordenId
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 32
+          description: Identificador de la orden, tal como lo conoce el sistema origen (número de orden de WMS o número de guía).
+      responses:
+        '200':
+          description: Estado de todas las sub-órdenes bajo este ordenId
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SolicitudTrazabilidad'
+        '404':
+          description: No existe ninguna sub-orden registrada bajo este ordenId.
+
+  # ============================================================
+  # INTERNO — notificación de solicitud lista
+  # ============================================================
+  /internal/unogroup/solicitudes:
+    post:
+      tags: [interno]
+      x-internal: true
+      operationId: notificarSolicitudLista
+      summary: Notifica que una solicitud está lista para enviarse al partner de ensamble
+      description: >
+        Envía una sub-orden ya enriquecida con todos los datos necesarios para
+        que se procese y se envíe al partner de ensamble. El mensaje lleva el
+        contenido completo — quien recibe la notificación no tiene acceso a
+        ninguna base de datos propia, así que no puede ir a buscar el detalle
+        por su cuenta.
+
+        Se responde de inmediato, antes de procesar — el procesamiento (y el
+        eventual envío al partner de ensamble) ocurre después, de forma
+        asíncrona; el resultado se reporta por separado (ver
+        `notificarResultadoSolicitud` más abajo).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SolicitudNotificacion'
+      responses:
+        '202':
+          description: Notificación aceptada; la solicitud se procesará de forma asíncrona.
+        '400':
+          description: Payload malformado o incompleto.
+
+  # ============================================================
+  # INTERNO — callback con el resultado
+  # ============================================================
+  /internal/orquestador/solicitudes/resultado:
+    post:
+      tags: [interno]
+      x-internal: true
+      operationId: notificarResultadoSolicitud
+      summary: Reporta el resultado de procesar una solicitud enviada al partner de ensamble
+      description: >
+        Se invoca una sola vez, al terminar de procesar una solicitud —
+        con éxito o tras agotar los reintentos sin éxito. Incluye el
+        resultado final y el detalle de cada intento HTTP realizado
+        (incluyendo la obtención o renovación de credenciales, no solo
+        los intentos de envío).
+
+        Quien recibe este resultado no vuelve a tener contacto con la
+        ejecución que lo produjo — no hay estado intermedio ni forma de
+        "consultar" el progreso mientras ocurre; este mensaje es la única
+        fuente de verdad sobre qué pasó.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResultadoSolicitud'
+      responses:
+        '200':
+          description: Resultado registrado.
+        '400':
+          description: Payload malformado o incompleto.
+        '404':
+          description: No se encontró ninguna sub-orden para ese ordenId+sku.
+
+components:
+
+  schemas:
+
+    # ------------------------------------------------------------
+    # Envelope del mecanismo de mensajería (formato fijo, no de negocio)
+    # ------------------------------------------------------------
+    PubSubPushEnvelope:
+      type: object
+      required: [message, subscription]
+      properties:
+        message:
+          $ref: '#/components/schemas/PubSubMessage'
+        subscription:
+          type: string
+          description: Identificador del canal de origen del mensaje.
+          example: projects/siman-mservices/subscriptions/ensambles-ingesta-sub
+
+    PubSubMessage:
+      type: object
+      required: [data, attributes, messageId, publishTime]
+      properties:
+        data:
+          type: string
+          format: byte
+          description: >
+            Contenido del evento de negocio, codificado en base64. El schema
+            tras decodificar depende de `origen`+`tipo_evento`: `EventoWmsCrear`,
+            `WmsUP05Payload` o `WmsUP06Payload` (origen WMS) o `EventoGuias`
+            (origen Guías Manuales, comparte un único schema entre CARM/TARM/
+            DARM — ver más abajo). Para las notificaciones de entrega al
+            cliente, el schema exacto aún no está definido.
+        attributes:
+          type: object
+          description: >
+            Atributos usados para identificar el origen y el tipo de solicitud
+            antes de procesar el contenido del mensaje.
+          required: [origen, tipo_evento]
+          properties:
+            origen:
+              type: string
+              enum: [wms, guias]
+              description: Sistema que originó la solicitud, ya sea en su creación o en una actualización posterior.
+            flujo:
+              type: string
+              enum: [ASSE, ENSA, CARM, TARM, DARM]
+              nullable: true
+              description: >
+                **Requerido para `origen=guias`** (distingue CARM/TARM/DARM al
+                momento de publicar). **No aplica / ausente para `origen=wms`**
+                (confirmado): ASSE vs. ENSA se determina por línea dentro de
+                `orderdetails[]`, después de consultar el shipment — una misma
+                orden puede tener líneas de ambos tipos, así que quien publica
+                el evento de WMS no puede conocer el flujo de antemano. Para
+                `origen=wms` el ruteo depende solo de `origen`+`tipo_evento`;
+                ASSE/ENSA quedan como valores puramente internos, asignados
+                por sub-orden dentro del Orquestador.
+            tipo_evento:
+              type: string
+              description: >
+                Código nativo del evento tal como lo conoce el sistema de
+                origen — no una traducción a vocabulario de negocio. Para
+                origen wms: CREAR, UP05, UP06. Para origen guias: creacion,
+                actualizacion (confirmado).
+              example: UP05
+        messageId:
+          type: string
+        publishTime:
+          type: string
+          format: date-time
+
+    # ------------------------------------------------------------
+    # Schemas de evento — origen WMS
+    # Cambio de arquitectura (esta sesión): los eventos de WMS ya NO traen
+    # los datos de negocio — son disparadores mínimos. El Orquestador
+    # siempre consulta GET /wms/dw/v1/shipment/get-shipment/{whseId}/
+    # {externOrderKey} (ver WmsShipmentDetail) para obtener los datos reales,
+    # tanto en creación como en actualización. EventoAsse/EventoEnsa
+    # (versión anterior de este documento) quedan retirados — asumían que
+    # el evento ya traía el flujo (ASSE/ENSA) determinado, algo que
+    # estructuralmente no es posible: el flujo se determina por línea,
+    # dentro de `orderdetails[].ext_udf_str10`, no a nivel de orden/evento.
+    # ------------------------------------------------------------
+    EventoWmsCrear:
+      type: object
+      description: >
+        Disparador de creación — mínimo, sin datos de negocio. El Orquestador
+        consulta el shipment (WmsShipmentDetail) para obtener el resto.
+      required: [whseId, externOrderKey]
+      properties:
+        whseId: { type: string, example: wmwhse1 }
+        externOrderKey:
+          type: string
+          description: >
+            Tipo de dato inconsistente entre fuentes — llega como entero sin
+            comillas en algunos eventos crudos (ver WmsUP05Payload) pero como
+            string en la respuesta del shipment (`externorderkey`). Se
+            documenta aquí como string; el consumer debe normalizar.
+
+    WmsUP05Payload:
+      type: object
+      description: >
+        Evento "Pack Complete" — confirma que el empaque de la orden terminó.
+        Payload crudo real de Infor WMS, tal como viaja en `message.data`.
+        NO está en lenguaje de negocio: es solo un disparador — `detail[]`
+        ya no se usa como fuente de datos (confirmado esta sesión); el
+        Orquestador solo extrae `whseId`+`externOrderKey` de `Head` y
+        consulta el shipment para todo lo demás.
+      required: [Head]
+      properties:
+        Head:
+          type: object
+          required: [orderKey, externOrderKey, detail]
+          properties:
+            storerKey: { type: string, example: AS }
+            whseId: { type: string, example: wmwhse1 }
+            orderKey: { type: string, example: "0000679621" }
+            externOrderKey:
+              type: integer
+              format: int64
+              description: >
+                Junto con `whseId`, la única llave que el Orquestador necesita
+                extraer de este payload. Nótese el tipo: entero aquí, string
+                en la respuesta del shipment (`externorderkey`) — normalizar.
+            susr1: { type: integer, nullable: true }
+            route: { type: integer, nullable: true }
+            c_company: { type: string, nullable: true, description: "Ya no se usa como fuente — ver WmsShipmentDetail." }
+            c_address1: { type: string, nullable: true, description: "Ya no se usa como fuente — ver WmsShipmentDetail." }
+            c_city: { type: string, nullable: true, description: "Ya no se usa como fuente — ver WmsShipmentDetail." }
+            c_state: { type: string, nullable: true, description: "Ya no se usa como fuente — ver WmsShipmentDetail." }
+            c_phone1: { type: string, nullable: true, description: "Ya no se usa como fuente — ver WmsShipmentDetail." }
+            dropid: { type: string, nullable: true }
+            peso: { type: number, nullable: true }
+            volumen: { type: number, nullable: true }
+            bultos: { type: integer, nullable: true }
+            ext_udf_str1: { type: string, nullable: true }
+            fecha:
+              type: string
+              description: >
+                Formato "dd/MM/yyyy HH:mm:ss" (NO ISO 8601). ⚠ Pendiente
+                confirmar si todavía se usa para algo (ej. `tracking_dispatched_time`)
+                o si el Orquestador usa su propia hora de recepción del evento
+                — ver Diseño §9.6, pregunta pendiente sobre timestamps.
+              example: "07/03/2026 20:40:27"
+            usuario: { type: string, nullable: true }
+            detail:
+              type: array
+              minItems: 1
+              description: >
+                Solo disparador — ya no se usa como fuente de SKUs/cantidades
+                (esas vienen de `orderdetails[]` en WmsShipmentDetail, filtradas
+                por `ext_udf_str10`). La ambigüedad de líneas repetidas con el
+                mismo sku (Diseño §4.1 nota 3, pregunta A4) queda sin efecto
+                por este mismo motivo.
+              items:
+                type: object
+                properties:
+                  externLineNumber: { type: integer }
+                  sku: { type: integer, format: int64 }
+                  qty: { type: number }
+                  lottable7: { type: string, nullable: true }
+                  cartonType: { type: string, nullable: true }
+                  alto: { type: number, nullable: true }
+                  largo: { type: number, nullable: true }
+                  ancho: { type: number, nullable: true }
+
+    WmsUP06Payload:
+      type: object
+      description: >
+        Evento "loadshipped" (despacho) — lote de una o más órdenes
+        despachadas juntas. ⚠ Estructura fundamentalmente distinta a UP05:
+        `Head` es un ARREGLO de órdenes — un mensaje puede traer múltiples
+        órdenes despachadas juntas. Requiere fan-out de DOS niveles: por
+        orden dentro de `Head[]` (cada una dispara su propia consulta al
+        shipment), y luego por línea calificada dentro de `orderdetails[]`
+        de esa consulta (no dentro de `pickDetail[]` — confirmado, sin
+        despachos parciales, no hace falta cruzar contra `pickDetail[]`).
+        `pickDetail[]` queda como disparador únicamente, igual que `detail[]`
+        en UP05.
+      required: [Head]
+      properties:
+        Head:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [orderKey, externOrderKey, pickDetail]
+            properties:
+              transmitlogkey: { type: integer }
+              storerKey: { type: string, example: AS }
+              loadId: { type: string, example: "0000268017" }
+              orderKey: { type: string }
+              externOrderKey:
+                type: integer
+                format: int64
+                description: >
+                  Junto con `whseid`, la llave a extraer por cada orden del
+                  lote — distinta por cada elemento de `Head[]`.
+              whseid: { type: string, description: "Nota: minúscula, distinto de whseId (con mayúscula) en UP05 — mismo campo, casing distinto entre eventos." }
+              consigneeKey: { type: integer, nullable: true }
+              susr1: { type: integer, nullable: true }
+              susr3:
+                type: integer
+                nullable: true
+                description: >
+                  A nivel de ORDEN. No confundir con el susr3 dentro de
+                  pickDetail[] (nivel de ítem). Evidencia adicional (esta
+                  sesión, vía WmsShipmentDetail): en la respuesta del
+                  shipment, `susr3` de header duplica `externorderkey` — no
+                  es necesariamente un dato distinto, contradice la suposición
+                  original de que era el # de pedido e-commerce (Diseño §4.1
+                  nota 1).
+              pickDetail:
+                type: array
+                minItems: 1
+                description: "Equivalente a `detail[]` de UP05 — solo disparador, no fuente de datos."
+                items:
+                  type: object
+                  properties:
+                    sku: { type: integer, format: int64 }
+                    qty: { type: number }
+                    id: { type: string, nullable: true }
+                    susr3: { type: integer, nullable: true, description: "A nivel de ÍTEM — distinto del susr3 a nivel de orden (arriba)." }
+                    stop: { type: integer, nullable: true }
+                    ruta: { type: integer, nullable: true, description: "Equivalente a `route` de UP05, pero con nombre distinto." }
+                    lottable07: { type: string, nullable: true }
+                    lottable03: { type: string, nullable: true }
+                    addDate: { type: string, format: date-time }
+                    editWho: { type: string, nullable: true }
+
+    # ------------------------------------------------------------
+    # Respuesta de GET /wms/dw/v1/shipment/get-shipment/{whseId}/{externOrderKey}
+    # Fuente real de todos los datos de negocio para WMS (creación y
+    # actualización) — reemplaza lo que antes se asumía que venía en el
+    # evento mismo o vía "consulta: RMS". Solo se documentan los campos
+    # que el Orquestador efectivamente usa; la respuesta real trae muchos más.
+    # ------------------------------------------------------------
+    WmsShipmentDetail:
+      type: object
+      required: [externorderkey, orderdetails]
+      properties:
+        externorderkey:
+          type: string
+          description: "String aquí — entero en los eventos crudos UP05/UP06. Normalizar."
+        whseid: { type: string }
+        storerkey: { type: string, example: AS, description: "Candidato para derivar país — Diseño §4.1 nota 2, sin confirmar." }
+        bcompany: { type: string, nullable: true }
+        ccompany: { type: string, nullable: true, description: "Visto igual a bcompany en el ejemplo real — cuál usar como customer_name sin confirmar." }
+        caddress1: { type: string, nullable: true }
+        caddress2: { type: string, nullable: true }
+        caddress3: { type: string, nullable: true }
+        caddress4: { type: string, nullable: true }
+        caddress5: { type: string, nullable: true }
+        caddress6: { type: string, nullable: true, description: "Dirección fragmentada en 6 campos, varios vacíos en el ejemplo real — concatenar para `direccion`." }
+        ccity: { type: string, nullable: true }
+        cstate: { type: string, nullable: true }
+        ccountry:
+          type: string
+          nullable: true
+          description: "Visto null en el ejemplo real — confirma que A3 (derivar país) sigue sin resolver, ahora con evidencia directa."
+        cphone1: { type: string, nullable: true }
+        cemail2: { type: string, nullable: true }
+        referencenum:
+          type: string
+          nullable: true
+          description: "Visto igual a ext_udf_str7 en el ejemplo real — consistente con el mapeo original a external_reference_alt_1."
+        susr3:
+          type: string
+          nullable: true
+          description: "A nivel de header. Visto igual a externorderkey en el ejemplo real — probablemente no es un dato distinto, ver nota en WmsUP06Payload."
+        adddate: { type: string, format: date-time, nullable: true, description: "Candidato para tracking_order_time — sin confirmar frente a orderdate (pendiente)." }
+        orderdate: { type: string, format: date-time, nullable: true, description: "Candidato para tracking_order_time — sin confirmar frente a adddate (pendiente)." }
+        orderdetails:
+          type: array
+          description: >
+            Una línea por ítem de la orden. El Orquestador filtra por
+            `ext_udf_str10` no nulo para decidir qué líneas generan sub-orden
+            de ensamble — las demás (`ext_udf_str10 = null`) se ignoran.
+          items:
+            type: object
+            required: [sku]
+            properties:
+              sku: { type: string }
+              originalqty: { type: number, nullable: true }
+              shippedqty: { type: number, nullable: true }
+              ext_udf_str10:
+                type: string
+                nullable: true
+                enum: [ASSE, ENSA, null]
+                description: >
+                  **Campo crítico (resuelve A1).** Determina el flujo por
+                  línea: "ASSE" → armado a domicilio, "ENSA" → armado en
+                  centro de distribución, `null` → la línea no requiere
+                  ensamble y se ignora. No viene en los eventos UP05/UP06 ni
+                  en el evento de creación — solo en esta respuesta.
+              pickinginstructions:
+                type: string
+                nullable: true
+                description: >
+                  Texto libre (ej. "Artículo ASSE - 2 piezas") — señal
+                  redundante útil como respaldo/validación cruzada de
+                  ext_udf_str10, no como fuente primaria.
+
+    # ------------------------------------------------------------
+    # Schema de evento único — origen Guías Manuales
+    # Cubre los tres flujos (CARM/TARM/DARM); el atributo `flujo` del
+    # mensaje Pub/Sub distingue cuál es cuál, no la forma del body.
+    # Un solo evento por orden/guía, con todos los SKUs incluidos en
+    # `items[]` — el Orquestador hace el fan-out a una sub-orden por
+    # SKU, no el aplicativo de Guías.
+    # Contenido sujeto a confirmación con el equipo responsable
+    # del aplicativo de guías (ver Diseño §4.2.1).
+    # ------------------------------------------------------------
+    EventoGuias:
+      type: object
+      description: >
+        Evento unificado para los flujos CARM, TARM y DARM. Los campos que
+        no aplican a un flujo determinado viajan como `null` — ver tabla
+        de aplicabilidad por flujo en Diseño §4.2.
+      required: [ordenId, items]
+      properties:
+        ordenId:
+          type: string
+          description: Número de guía o identificador del formulario.
+        tiendaSolicitante:
+          type: string
+          nullable: true
+          description: Solo aplica a TARM y DARM.
+        departamentoSolicitante:
+          type: string
+          nullable: true
+          description: Solo aplica a TARM.
+        referenciaUbicacionServicio:
+          type: string
+          nullable: true
+          description: >
+            Referencia externa de tienda/CD cuando el servicio no es en
+            casa (ej. "TIENDA-001", "CD-SAL-001"). Aplica a TARM y DARM.
+        guiaRelacionada:
+          type: string
+          nullable: true
+          description: >
+            Vínculo a la guía de retiro/entrega que se generará posteriormente
+            para la misma venta. Solo aplica a DARM. Pendiente confirmar si
+            este vínculo también debe informarse al partner de ensamble.
+        numeroFactura: { type: string, nullable: true, description: "Solo aplica a CARM." }
+        nombreCliente: { type: string, nullable: true, description: "Solo aplica a CARM." }
+        telefonoCliente: { type: string, nullable: true, description: "Solo aplica a CARM." }
+        correoCliente: { type: string, nullable: true, description: "Solo aplica a CARM." }
+        clienteVip: { type: boolean, nullable: true, description: "Solo aplica a CARM." }
+        direccion: { type: string, nullable: true, description: "Solo aplica a CARM." }
+        municipio: { type: string, nullable: true, description: "Solo aplica a CARM." }
+        departamento: { type: string, nullable: true, description: "Solo aplica a CARM." }
+        pais:
+          type: string
+          nullable: true
+          example: SV
+          description: "Código ISO país. Solo aplica a CARM. Pendiente confirmar cómo se deriva."
+        latitud:
+          type: number
+          format: double
+          nullable: true
+          description: "Solo aplica a CARM. Pendiente confirmar si el aplicativo geocodifica."
+        longitud:
+          type: number
+          format: double
+          nullable: true
+          description: "Solo aplica a CARM. Pendiente confirmar si el aplicativo geocodifica."
+        tipoServicio:
+          type: string
+          nullable: true
+          description: >
+            "armado" (CARM/TARM) o "desarmado" (DARM, valor sin confirmar).
+            Potencialmente derivable del atributo `flujo` en vez de venir
+            explícito en el body — pendiente decidir.
+        ubicacionServicio:
+          type: string
+          nullable: true
+          description: >
+            "casa" (CARM) o "tienda" (TARM/DARM). Potencialmente derivable
+            del atributo `flujo` — pendiente decidir.
+        fechaOrden:
+          type: string
+          format: date-time
+          nullable: true
+          description: Solo aplica a CARM.
+        fechaEstimada:
+          type: string
+          format: date-time
+          nullable: true
+          description: Solo aplica a CARM.
+        fechaPlanificadaDespacho:
+          type: string
+          format: date-time
+          nullable: true
+          description: Aplica a CARM y DARM.
+        fechaPlanificadaEntrega:
+          type: string
+          format: date-time
+          nullable: true
+          description: Aplica a CARM y DARM.
+        items:
+          type: array
+          minItems: 1
+          description: >
+            Un elemento por SKU de la orden. El aplicativo de Guías publica
+            un solo evento por orden con todos los ítems — es el Orquestador
+            quien hace el fan-out a una sub-orden por SKU hacia Solution One,
+            no el origen.
+          items:
+            type: object
+            required: [sku]
+            properties:
+              sku: { type: string, maxLength: 50 }
+              cantidad: { type: integer, minimum: 1, nullable: true }
+              marcaProducto:
+                type: string
+                nullable: true
+                description: Pendiente confirmar si el formulario lo captura o solo el SKU.
+              categoriaProducto:
+                type: string
+                nullable: true
+                description: Pendiente confirmar si el formulario lo captura o solo el SKU.
+              descripcionProducto:
+                type: string
+                nullable: true
+                description: Pendiente confirmar si el formulario lo captura o solo el SKU.
+
+    # ------------------------------------------------------------
+    # Notificación de solicitud lista (interno) — payload completo,
+    # ya no una referencia: quien la recibe no tiene base de datos
+    # propia para ir a buscar el contenido.
+    # ------------------------------------------------------------
+    SolicitudNotificacion:
+      type: object
+      required: [ordenId, sku, accion, timestamp, payloadEnriquecido]
+      properties:
+        ordenId:
+          type: string
+          maxLength: 32
+        sku:
+          type: string
+          maxLength: 50
+        accion:
+          type: string
+          enum: [create, update]
+          description: >
+            Discriminador explícito — sin este campo, quien recibe la
+            notificación tendría que inferir si es creación o actualización
+            revisando qué campos trae `payloadEnriquecido`, algo frágil e
+            implícito. Lo decide el Orquestador según su propia lógica de
+            idempotencia (primera vez que existe `ordenId+sku` → `create`;
+            en cualquier otro caso → `update`) — nunca el origen. Los valores
+            coinciden a propósito con el prefijo usado en el nombre de
+            archivo hacia Solution One, para no traducir dos veces.
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento en que la sub-orden quedó lista para ser procesada.
+        payloadEnriquecido:
+          oneOf:
+            - $ref: '#/components/schemas/PayloadEnriquecido'
+            - $ref: '#/components/schemas/PayloadEnriquecidoActualizacion'
+          description: >
+            Creación o actualización, según el valor de `accion`. El `oneOf`
+            describe la forma del contenido; `accion` es lo que realmente
+            se usa para decidir cuál es, no una inspección del payload.
+
+    # ------------------------------------------------------------
+    # Contenido de una solicitud enriquecida (creación) — nombres de
+    # campo en lenguaje de negocio, confirmados contra el mapeo real
+    # hacia el partner de ensamble. Ver Diseño §4.1/§4.4.
+    # ------------------------------------------------------------
+    PayloadEnriquecido:
+      type: object
+      required: [ordenId, sku, tipoServicio, ubicacionServicio, cantidad, estado, fechaOrden]
+      properties:
+        ordenId: { type: string, maxLength: 32 }
+        numeroFactura: { type: string, nullable: true }
+        numeroPedidoEcommerce:
+          type: string
+          nullable: true
+          description: >
+            Sin nombre de campo confirmado todavía — se deja este nombre
+            tentativo. Marcado explícitamente como pendiente incluso en el
+            mapeo ya confirmado hacia el partner de ensamble.
+        nombreCliente: { type: string, nullable: true }
+        telefonoCliente: { type: string, nullable: true }
+        correoCliente: { type: string, nullable: true }
+        clienteVip: { type: boolean, nullable: true }
+        direccion: { type: string, nullable: true }
+        ciudad: { type: string, nullable: true }
+        departamento: { type: string, nullable: true }
+        pais: { type: string, nullable: true, example: SV }
+        latitud: { type: number, format: double, nullable: true }
+        longitud: { type: number, format: double, nullable: true }
+        tipoServicio:
+          type: string
+          description: >
+            Valor confirmado para ASSE/ENSA/CARM/TARM: "armado". Sin confirmar
+            el valor para DARM (¿"desarmado"?).
+          example: armado
+        ubicacionServicio:
+          type: string
+          example: casa
+        referenciaUbicacionServicio: { type: string, nullable: true }
+        sku: { type: string, maxLength: 50 }
+        marcaProducto: { type: string, nullable: true }
+        categoriaProducto: { type: string, nullable: true }
+        descripcionProducto: { type: string, nullable: true }
+        cantidad: { type: integer, minimum: 1 }
+        estado:
+          type: string
+          enum: [creada, alistada, despachada, entregada, retornada]
+        fechaOrden: { type: string, format: date-time }
+        fechaPlanificadaDespacho: { type: string, format: date-time, nullable: true }
+        fechaPlanificadaEntrega: { type: string, format: date-time, nullable: true }
+
+    # ------------------------------------------------------------
+    # Contenido de una actualización — subconjunto de PayloadEnriquecido.
+    # Nota: sin sku — el sku identifica el archivo/ruta destino, no es
+    # un campo del body en actualizaciones (confirmado, Diseño §4.4).
+    # ------------------------------------------------------------
+    PayloadEnriquecidoActualizacion:
+      type: object
+      required: [ordenId, estado]
+      properties:
+        ordenId: { type: string, maxLength: 32 }
+        estado:
+          type: string
+          enum: [creada, alistada, despachada, entregada, retornada]
+        fechaRealDespacho: { type: string, format: date-time, nullable: true }
+        fechaRealEntrega: { type: string, format: date-time, nullable: true }
+
+
+    ResultadoSolicitud:
+      type: object
+      required: [ordenId, sku, resultadoFinal, intentos]
+      properties:
+        ordenId:
+          type: string
+          maxLength: 32
+        sku:
+          type: string
+          maxLength: 50
+        resultadoFinal:
+          type: string
+          enum: [ENVIADA_PARTNER, ACEPTADA_PARTNER, RECHAZADA_PARTNER]
+        intentos:
+          type: array
+          description: >
+            Detalle de cada intento HTTP realizado durante el procesamiento,
+            en orden — incluye tanto los intentos de obtención/renovación de
+            credenciales como los de envío del contenido.
+          items:
+            type: object
+            required: [numero, tipoPeticion, exitoso]
+            properties:
+              numero:
+                type: integer
+                minimum: 1
+              tipoPeticion:
+                type: string
+                enum: [AUTH_TOKEN, UPLOAD_CREATE, UPLOAD_UPDATE]
+              codigoHttp:
+                type: integer
+                nullable: true
+              duracionMs:
+                type: integer
+                nullable: true
+              esReintento:
+                type: boolean
+              exitoso:
+                type: boolean
+              errorMensaje:
+                type: string
+                nullable: true
+        payloadPartner:
+          oneOf:
+            - $ref: '#/components/schemas/SolutionOneCreatePayload'
+            - $ref: '#/components/schemas/SolutionOneUpdatePayload'
+          nullable: true
+          description: >
+            El contenido ya transformado al formato que espera el partner de
+            ensamble — lo que efectivamente se envió, distinto del contenido
+            en lenguaje de negocio que se recibió en la notificación.
+
+    # ------------------------------------------------------------
+    # Formato real de salida hacia el partner de ensamble — confirmado
+    # contra el mapeo real (Diseño §4.4). Nombres de campo en snake_case,
+    # propios del contrato del partner (no lenguaje de negocio).
+    # ------------------------------------------------------------
+    SolutionOneCreatePayload:
+      type: object
+      properties:
+        external_reference: { type: string }
+        external_reference_alt_1: { type: string, nullable: true }
+        external_reference_alt_2: { type: string, nullable: true, description: "Sin nombre de campo API de origen confirmado — ver PayloadEnriquecido.numeroPedidoEcommerce." }
+        customer_name: { type: string, nullable: true }
+        customer_phone: { type: string, nullable: true }
+        customer_email: { type: string, nullable: true }
+        customer_vip: { type: boolean, nullable: true }
+        customer_address: { type: string, nullable: true }
+        customer_city: { type: string, nullable: true }
+        customer_state: { type: string, nullable: true }
+        customer_country: { type: string, nullable: true }
+        customer_latitude: { type: number, format: double, nullable: true }
+        customer_longitude: { type: number, format: double, nullable: true }
+        service_type: { type: string }
+        service_location: { type: string }
+        service_location_reference: { type: string, nullable: true }
+        item_sku: { type: string }
+        item_brand: { type: string, nullable: true }
+        item_category: { type: string, nullable: true }
+        item_description: { type: string, nullable: true }
+        item_quantity: { type: integer }
+        tracking_status: { type: string }
+        tracking_order_time: { type: string, format: date-time }
+        tracking_dispatch_plan_time: { type: string, format: date-time, nullable: true }
+        tracking_delivery_plan_time: { type: string, format: date-time, nullable: true }
+
+    SolutionOneUpdatePayload:
+      type: object
+      description: Sin item_sku — el sku se identifica por la ruta/nombre del archivo, no por un campo del body.
+      properties:
+        external_reference: { type: string }
+        tracking_status: { type: string }
+        tracking_dispatched_time: { type: string, format: date-time, nullable: true }
+        tracking_delivered_time: { type: string, format: date-time, nullable: true }
+ss
+    # ------------------------------------------------------------
+    # Respuesta de trazabilidad (público)
+    # ------------------------------------------------------------
+    SolicitudTrazabilidad:
+      type: object
+      properties:
+        ordenId:
+          type: string
+        subOrdenes:
+          type: array
+          items:
+            type: object
+            properties:
+              sku: { type: string }
+              flujo: { type: string, enum: [ASSE, ENSA, CARM, TARM, DARM] }
+              estadoInterno:
+                type: string
+                enum: [RECIBIDA, ENRIQUECIDA, ENVIADA_PARTNER, ACEPTADA_PARTNER, RECHAZADA_PARTNER]
+              trackingStatus:
+                type: string
+                enum: [creada, alistada, despachada, entregada, retornada]
+              fechaCreacion: { type: string, format: date-time }
+              fechaActualizacion: { type: string, format: date-time }

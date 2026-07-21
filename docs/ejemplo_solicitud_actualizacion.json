@@ -1,0 +1,11 @@
+{
+  "ordenId": "9013059587",
+  "sku": "104929691",
+  "timestamp": "2026-07-15T18:42:03Z",
+  "payloadEnriquecido": {
+    "ordenId": "9013059587",
+    "estado": "despachada",
+    "fechaRealDespacho": "2026-04-11T08:05:00Z",
+    "fechaRealEntrega": null
+  }
+}

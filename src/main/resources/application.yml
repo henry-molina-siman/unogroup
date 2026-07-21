@@ -1,0 +1,102 @@
+# ============================================================
+# unogroup-app — Configuración base Spring Boot
+# ============================================================
+spring:
+  application:
+    name: unogroup-app
+  threads:
+    virtual:
+      enabled: true   # abarata el Thread.sleep del backoff exponencial hacia Solution One
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true   # expone /actuator/health/readiness y /liveness (k8s/deployment.yaml)
+  endpoints:
+    web:
+      exposure:
+        include: health
+
+# ----------------------------------------------------------
+# OpenFeign — dos clientes: hacia Solution One y hacia el
+# callback de orquestador-app
+# ----------------------------------------------------------
+feign:
+  client:
+    config:
+      solutionOneClient:
+        connect-timeout: ${SOLUTIONONE_TIMEOUT_CONN_MS:3000}
+        read-timeout: ${SOLUTIONONE_TIMEOUT_READ_MS:5000}
+        logger-level: ${SOLUTIONONE_FEIGN_LOG_LEVEL:basic}
+        # Sin Retryer propio (NEVER_RETRY) — la política de reintentos
+        # vive en `service`, no en Feign, para no duplicar lógica en
+        # dos capas (ver Diseño §2.11).
+      orquestadorCallbackClient:
+        connect-timeout: ${CALLBACK_TIMEOUT_CONN_MS:2000}
+        read-timeout: ${CALLBACK_TIMEOUT_READ_MS:3000}
+        logger-level: ${CALLBACK_FEIGN_LOG_LEVEL:basic}
+
+# ----------------------------------------------------------
+# Configuración propia de unogroup-app
+# ----------------------------------------------------------
+ensambles:
+
+  adapter:
+    solutionone:
+      base-url: ${SOLUTIONONE_BASE_URL:https://data.solution1.us}
+      token-path: ${SOLUTIONONE_TOKEN_PATH:/api/v2/user/token}
+      upload-path: ${SOLUTIONONE_UPLOAD_PATH:/api/v2/user/files/upload}
+      # Basic Auth — vacíos por defecto para forzar configuración
+      # explícita vía Secret Manager antes de poder llamar a Solution One real.
+      usuario: ${SOLUTIONONE_USUARIO:}
+      password: ${SOLUTIONONE_PASSWORD:}
+      # Raíz común; SolutionOneFileNaming agrega /create o /update según
+      # el tipo de subida (ruta real: /siman/create/ o /siman/update/).
+      ruta-base: ${SOLUTIONONE_RUTA_BASE:siman}
+      # Debe ser true en producción; false expone el sistema a 403 cuando
+      # la carpeta padre no existe todavía.
+      mkdir-parents: ${SOLUTIONONE_MKDIR_PARENTS:true}
+      reintentos:
+        # Síncronos, en el mismo hilo (Diseño §2.11) — sin scheduler,
+        # sin tabla de polling. Java 21 + virtual threads hacen barato
+        # el Thread.sleep entre intentos.
+        max-intentos: ${SOLUTIONONE_MAX_INTENTOS:5}
+        backoff-inicial-ms: ${SOLUTIONONE_BACKOFF_MS:1000}
+        backoff-multiplicador: 2
+
+  # Valor de service_type para el flujo DARM — no confirmado con UnoGroup
+  # (Diseño §9.6 F18). Solo "armado" está confirmado (ASSE/ENSA/CARM/TARM).
+  # Configurable para no bloquear ni requerir recompilar cuando se confirme.
+  mapper:
+    darm-service-type: ${DARM_SERVICE_TYPE:armado}   # ⚠ TBD F18
+
+  # Endpoint interno que recibe la notificación del Orquestador
+  # (payload_enriquecido completo).
+  # ⚠ TBD (Diseño §9.6 F8): mecanismo de autenticación entre servicios
+  # dentro del clúster — hoy no hay ninguno definido más allá de que el
+  # Service es ClusterIP (no alcanzable desde fuera del clúster).
+  notificacion:
+    autenticacion-habilitada: ${NOTIFICACION_AUTH_HABILITADA:false}   # ⚠ TBD — ver Diseño F8
+
+  # Cliente de callback hacia orquestador-app.
+  callback:
+    orquestador-url: ${ORQUESTADOR_APP_URL:http://svc-orquestador.ensambles.svc.cluster.local}
+    # Más intentos que el reintento corto de la notificación entrante
+    # (blips de red interna), sin llegar al backoff largo de Solution One.
+    # Si se agotan los 5 intentos, el resultado se registra en logs a
+    # nivel ERROR (formato estructurado, recuperable manualmente).
+    reintentos:
+      max-intentos: ${CALLBACK_MAX_INTENTOS:5}
+      backoff-inicial-ms: ${CALLBACK_BACKOFF_MS:500}
+      backoff-multiplicador: 2
+
+logging:
+  level:
+    root: INFO
+    com.siman.ensambles.unogroup: ${LOG_LEVEL_APP:INFO}
+    # Nunca loguear payload completo con PII en INFO o superior. A nivel
+    # DEBUG, enmascarado (nunca en texto plano).

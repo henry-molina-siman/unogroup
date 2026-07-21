@@ -1,0 +1,14 @@
+# unogroup-app/k8s/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: svc-unogroup
+  namespace: ensambles
+spec:
+  type: ClusterIP   # solo alcanzable dentro del clúster — nunca expuesto
+                     # fuera de GKE (Diseño §2.3)
+  selector:
+    app: unogroup-app
+  ports:
+    - port: 80
+      targetPort: 8080

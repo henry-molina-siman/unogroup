@@ -1,0 +1,38 @@
+# unogroup-app/k8s/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unogroup-app
+  namespace: ensambles
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: unogroup-app
+  template:
+    metadata:
+      labels:
+        app: unogroup-app
+    spec:
+      serviceAccountName: unogroup-app-sa   # Workload Identity — distinto del
+                                             # SA del Orquestador: solo este
+                                             # tiene permiso IAM sobre los
+                                             # secretos de Solution One.
+      containers:
+        - name: unogroup-app
+          image: TBD_REGISTRY/unogroup-app:TBD_TAG
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: unogroup-app-config          # SOLUTIONONE_BASE_URL, ORQUESTADOR_APP_URL, timeouts, etc.
+            - secretRef:
+                name: unogroup-app-solutionone-secret  # SOLUTIONONE_USUARIO, SOLUTIONONE_PASSWORD
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8080 }
+            initialDelaySeconds: 10
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8080 }
+            initialDelaySeconds: 20
+        # Sin sidecar cloud-sql-auth-proxy — unogroup-app no accede a MySQL
+        # (Diseño §2.3/§2.4). Su Deployment queda con un solo contenedor.
