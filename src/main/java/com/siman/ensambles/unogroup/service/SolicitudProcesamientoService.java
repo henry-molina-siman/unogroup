@@ -3,9 +3,13 @@ package com.siman.ensambles.unogroup.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import com.siman.ensambles.unogroup.callback.IntentoDto;
+import com.siman.ensambles.unogroup.callback.HttpRequestDto;
+import com.siman.ensambles.unogroup.callback.HttpResponseDto;
 import com.siman.ensambles.unogroup.callback.OrquestadorCallbackSender;
 import com.siman.ensambles.unogroup.callback.ResultadoSolicitudRequest;
+import com.siman.ensambles.unogroup.callback.TransaccionErrorDto;
+import com.siman.ensambles.unogroup.callback.TransaccionHttpDto;
+import com.siman.ensambles.unogroup.callback.TransaccionMetadataDto;
 import com.siman.ensambles.unogroup.client.SolutionOneFileNaming;
 import com.siman.ensambles.unogroup.config.SolutionOneProperties;
 import com.siman.ensambles.unogroup.controller.SolicitudNotificacionRequest;
@@ -67,7 +71,16 @@ public class SolicitudProcesamientoService {
                 solutionOneProperties.getRutaBase(), accion, trackingOrderTime, request.getOrdenId(), request.getSku());
 
         Object payloadPartner = mapper.mapear(payload, esCreacion);
-        byte[] contenido = serializar(payloadPartner);
+
+        byte[] contenido;
+        try {
+            contenido = serializar(payloadPartner);
+        } catch (JsonProcessingException ex) {
+            log.error("No se pudo serializar el payload hacia Solution One (ordenId={}, sku={}): {}",
+                    request.getOrdenId(), request.getSku(), ex.getMessage());
+            callbackSender.enviar(reportarFalloSerializacion(request, tipoPeticion, ex));
+            return;
+        }
 
         ResultadoProcesamiento resultado = retryPolicy.subir(contenido, path, tipoPeticion);
 
@@ -83,35 +96,105 @@ public class SolicitudProcesamientoService {
                 .ordenId(request.getOrdenId())
                 .sku(request.getSku())
                 .resultadoFinal(resultadoFinal)
-                .nombreArchivo(path)
-                .intentos(mapearIntentos(resultado.intentos()))
-                .payloadPartner(payloadPartner)
+                .transacciones(mapearTransacciones(resultado.transacciones()))
                 .build();
 
         callbackSender.enviar(callbackRequest);
     }
 
-    private byte[] serializar(Object payload) {
-        try {
-            return objectMapper.writeValueAsBytes(payload);
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("No se pudo serializar el payload hacia Solution One", ex);
-        }
+    private byte[] serializar(Object payload) throws JsonProcessingException {
+        return objectMapper.writeValueAsBytes(payload);
     }
 
-    private List<IntentoDto> mapearIntentos(List<IntentoRegistrado> intentos) {
-        return intentos.stream()
-                .map(i -> IntentoDto.builder()
-                        .numero(i.getNumero())
-                        .tipoPeticion(i.getTipoPeticion())
-                        .url(i.getUrl())
-                        .metodoHttp(i.getMetodoHttp())
-                        .codigoHttp(i.getCodigoHttp())
-                        .duracionMs(i.getDuracionMs())
-                        .esReintento(i.isEsReintento())
-                        .exitoso(i.isExitoso())
-                        .errorMensaje(i.getErrorMensaje())
+    /**
+     * SERIALIZACION (Guía de Transacciones HTTP §3.4) es el único caso de
+     * TransaccionError que ocurre antes de cualquier llamada HTTP real —
+     * no hay nada que capturar vía CapturingFeignClient, así que la
+     * transacción se construye a mano, con la URL que se habría invocado.
+     */
+    private ResultadoSolicitudRequest reportarFalloSerializacion(SolicitudNotificacionRequest request,
+            String tipoPeticion, Exception causa) {
+        Instant ahora = Instant.now();
+        TransaccionHttpDto transaccion = TransaccionHttpDto.builder()
+                .metadata(TransaccionMetadataDto.builder()
+                        .secuencia(1)
+                        .proposito(tipoPeticion)
+                        .esReintento(false)
                         .build())
-                .toList();
+                .request(HttpRequestDto.builder()
+                        .method("POST")
+                        .url(solutionOneProperties.getBaseUrl() + solutionOneProperties.getUploadPath())
+                        .timestamp(ahora)
+                        .build())
+                .error(TransaccionErrorDto.builder()
+                        .tipo("SERIALIZACION")
+                        .mensaje(causa.getMessage())
+                        .timestamp(ahora)
+                        .build())
+                .build();
+
+        return ResultadoSolicitudRequest.builder()
+                .ordenId(request.getOrdenId())
+                .sku(request.getSku())
+                .resultadoFinal("RECHAZADA_PARTNER")
+                .transacciones(List.of(transaccion))
+                .build();
+    }
+
+    private List<TransaccionHttpDto> mapearTransacciones(List<TransaccionRegistrada> transacciones) {
+        return transacciones.stream().map(this::mapearTransaccion).toList();
+    }
+
+    private TransaccionHttpDto mapearTransaccion(TransaccionRegistrada t) {
+        return TransaccionHttpDto.builder()
+                .metadata(TransaccionMetadataDto.builder()
+                        .secuencia(t.getMetadata().getSecuencia())
+                        .proposito(t.getMetadata().getProposito())
+                        .esReintento(t.getMetadata().isEsReintento())
+                        .build())
+                .request(mapearRequest(t.getRequest()))
+                .response(mapearResponse(t.getResponse()))
+                .error(mapearError(t.getError()))
+                .build();
+    }
+
+    private HttpRequestDto mapearRequest(HttpRequestRegistrado r) {
+        if (r == null) {
+            return null;
+        }
+        return HttpRequestDto.builder()
+                .method(r.getMethod())
+                .url(r.getUrl())
+                .timestamp(r.getTimestamp())
+                .contentType(r.getContentType())
+                .headers(r.getHeaders())
+                .body(r.getBody())
+                .build();
+    }
+
+    private HttpResponseDto mapearResponse(HttpResponseRegistrado r) {
+        if (r == null) {
+            return null;
+        }
+        return HttpResponseDto.builder()
+                .statusCode(r.getStatusCode())
+                .timestamp(r.getTimestamp())
+                .durationMs(r.getDurationMs())
+                .contentType(r.getContentType())
+                .headers(r.getHeaders())
+                .body(r.getBody())
+                .build();
+    }
+
+    private TransaccionErrorDto mapearError(TransaccionErrorRegistrado e) {
+        if (e == null) {
+            return null;
+        }
+        return TransaccionErrorDto.builder()
+                .tipo(e.getTipo())
+                .mensaje(e.getMensaje())
+                .timestamp(e.getTimestamp())
+                .durationMs(e.getDurationMs())
+                .build();
     }
 }

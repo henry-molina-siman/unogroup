@@ -6,7 +6,7 @@
 **Documento complementario:** `HUENSA-001_Diseno_Requerimientos_Modulo_Integracion_Ensamble.md` — principios, arquitectura de los dos microservicios, casos de uso, mapeo de campos y contrato OpenAPI. Léelo primero si buscas el *por qué* de una decisión; este documento es el *cómo*.
 **Stack:** Java 21 · Spring Boot 4.x · MySQL 8.0+ (Cloud SQL, instancia ya existente) · GKE (clúster ya existente) · GCP Pub/Sub · OpenFeign · Lombok · Bean Validation · SLF4J
 
-> **Historial de cambios, hallazgos de auditoría de código y trabajo técnico pendiente:** ver `HUENSA-001_Bitacora_Decisiones_Implementacion_Modulo_Integracion_Ensamble.md`. Este documento solo describe el estado actual del código; no lleva changelog ni anotaciones de sesión. Las secciones marcadas ⚠ **TBD** son piezas que ya sabemos que faltan pero todavía no se han cerrado en detalle — su historial y contexto vive en esa bitácora.
+> **Historial de cambios, hallazgos de auditoría de código y trabajo técnico pendiente:** ver `HUENSA-001_Implementacion_Bitacora_Decisiones_Modulo_Integracion_Ensamble.md`. Este documento solo describe el estado actual del código; no lleva changelog ni anotaciones de sesión. Las secciones marcadas ⚠ **TBD** son piezas que ya sabemos que faltan pero todavía no se han cerrado en detalle — su historial y contexto vive en esa bitácora.
 
 **Nomenclatura de tablas:** la instancia/schema de Cloud SQL donde vive este módulo se comparte con otros sistemas de Siman, no es exclusiva del módulo de ensambles. Las tres tablas (y sus constraints/índices/trigger) adoptan el prefijo `ensamble_` para evitar colisiones de nombre — ver DDL en §2 y `@Table(name = ...)` en las entidades JPA de §3 (ver Diseño §2.6 para el detalle de la decisión).
 
@@ -41,7 +41,7 @@
 
 ## 1.1 Repositorios Git y estructura de proyecto
 
-**`orquestador-app` y `unogroup-app` son dos proyectos independientes, cada uno con su propio repositorio Git.** No hay un `pom.xml` padre agregador, ni módulo Maven común entre ellos: cada repositorio contiene un único proyecto Maven `jar`, autocontenido, con su propio historial de commits, versionado (tags/releases) y pipeline de CI/CD. Las entidades JPA viven únicamente en `orquestador-app` (el único que las usa, ver §3); los enums de dominio se definen localmente en cada app, con los mismos valores — la consistencia entre ambos la garantiza el contrato OpenAPI (`HUENSA-001_openapi_V2.yaml`, que ya tiene esos valores como `enum:` en sus schemas), no una dependencia de build compartida.
+**`orquestador-app` y `unogroup-app` son dos proyectos independientes, cada uno con su propio repositorio Git.** No hay un `pom.xml` padre agregador, ni módulo Maven común entre ellos: cada repositorio contiene un único proyecto Maven `jar`, autocontenido, con su propio historial de commits, versionado (tags/releases) y pipeline de CI/CD. Las entidades JPA viven únicamente en `orquestador-app` (el único que las usa, ver §3); los enums de dominio se definen localmente en cada app, con los mismos valores — la consistencia entre ambos la garantiza el contrato OpenAPI (`HUENSA-001_openapi_V3.yaml`, que ya tiene esos valores como `enum:` en sus schemas), no una dependencia de build compartida.
 
 **Repositorio `orquestador-app`** (git remote propio):
 
@@ -71,7 +71,7 @@ unogroup-app/
 - **§6 (Dependencias Maven):** no hay `pom.xml` padre. Cada proyecto declara su propio `<parent>` apuntando directamente a `spring-boot-starter-parent`, e importa el BOM de Spring Cloud en su propio `dependencyManagement`. Ver §6.1 y §6.2.
 - **§7.1 (Dockerfile):** el build no copia un `pom.xml` padre ni usa `-pl` (build de un módulo dentro de un reactor) — cada `Dockerfile` vive en la raíz de su propio repositorio y compila un proyecto Maven normal, de un solo módulo.
 - **CI/CD:** cada repositorio tiene su propio pipeline (build, test, imagen de contenedor, tag) — versiones de imagen independientes para `orquestador-app` y `unogroup-app`.
-- **Consistencia de contrato:** la fuente de verdad entre ambos es el contrato OpenAPI (`HUENSA-001_openapi_V2.yaml`), nunca una dependencia de build compartida.
+- **Consistencia de contrato:** la fuente de verdad entre ambos es el contrato OpenAPI (`HUENSA-001_openapi_V3.yaml`), nunca una dependencia de build compartida.
 
 ## 1.2 Estructura de paquetes — `orquestador-app`
 
@@ -140,8 +140,8 @@ com.siman.ensambles.unogroup
 │                              # entre ambas apps la garantiza el contrato OpenAPI, no el classpath
 ├── mapper/                     # payload recibido (lenguaje Siman) → dto de Solution One
 ├── callback/                   # @FeignClient hacia orquestador-app — POST /internal/orquestador/
-│                              # solicitudes/resultado, con el resultado final y el detalle de
-│                              # cada intento (incluyendo AUTH_TOKEN) — ver Diseño §2.4
+│                              # solicitudes/resultado, con el resultado final y las
+│                              # transacciones[] (incluyendo AUTH_TOKEN) — ver Diseño §2.4
 └── config/
 ```
 
@@ -149,7 +149,7 @@ com.siman.ensambles.unogroup
 
 ### 1.4.1 `orquestador-app` — `messaging`
 
-- Recibe el `POST /internal/eventos` (push de Pub/Sub — ver `HUENSA-001_openapi_V2.yaml`).
+- Recibe el `POST /internal/eventos` (push de Pub/Sub — ver `HUENSA-001_openapi_V3.yaml`).
 - Decodifica `message.data` (base64) y lee `message.attributes.origen`/`tipo_evento` **antes** de deserializar el contenido — evita tener que "adivinar" el schema inspeccionando el JSON.
 - Rutea al mapper correspondiente según `origen`+`tipo_evento`. Para `origen=wms`, `flujo` no se lee ni se persiste como atributo de transporte — no aplica (Diseño §2.5): ASSE/ENSA se determinan por línea, dentro del `enrichment`, después de consultar el shipment, nunca al momento de publicar. Para `origen=guias`, `flujo` (`CARM`/`TARM`/`DARM`) sigue siendo obligatorio y sí se persiste directo.
 - El ruteo lee directamente `message.attributes.tipo_evento` (`CREAR`/`UP05`/`UP06` para WMS; `creacion`/`actualizacion` para Guías) — no hace falta inferir la transición comparando contra el estado actual de la sub-orden.
@@ -181,15 +181,15 @@ com.siman.ensambles.unogroup
 
 ### 1.4.4 `orquestador-app` — `client`
 
-- `@FeignClient` hacia `unogroup-app`, endpoint `POST /internal/unogroup/solicitudes` (ver `HUENSA-001_openapi_V2.yaml`).
+- `@FeignClient` hacia `unogroup-app`, endpoint `POST /internal/unogroup/solicitudes` (ver `HUENSA-001_openapi_V3.yaml`).
 - Payload: **el `payload_enriquecido` completo, más el campo `accion` explícito** (`create`/`update`, ver §1.4.2) — no una referencia. UnoGroup no tiene dónde ir a buscar el contenido, y no tiene que inferir si es creación o actualización a partir de la forma del payload (ver Diseño §2.4).
 - Reintento corto en el momento (2-3 intentos, backoff de segundos) ante fallas transitorias — ver Diseño §2.11. El job de `reconciliation` es la red de seguridad para el caso donde incluso este reintento corto falle del todo.
 - No espera el resultado final en la respuesta — UnoGroup responde `202` de inmediato; el resultado llega después por el callback (§1.4.4b).
 
 ### 1.4.4b `orquestador-app` — `controller` (endpoint de callback)
 
-- Expone `POST /internal/orquestador/solicitudes/resultado` (nombre tentativo, contrato exacto pendiente — Bitácora de Diseño, F8), que recibe el callback de `unogroup-app` con el resultado final y el detalle de cada intento (`AUTH_TOKEN` incluido).
-- Delega a `service`, que inserta cada intento como una fila de `ensamble_bitacora_partner` y transiciona `estado_interno` según `resultadoFinal` — este controller es la única vía por la que `ensamble_bitacora_partner` recibe datos (ver §1.4.2 y §2, ownership actualizado).
+- Expone `POST /internal/orquestador/solicitudes/resultado` (nombre tentativo, contrato exacto pendiente — Bitácora de Diseño, F8), que recibe el callback de `unogroup-app` con el resultado final y el registro completo de cada transacción HTTP (`transacciones[]`, `AUTH_TOKEN` incluido — contrato v3).
+- Delega a `service`, que inserta cada elemento de `transacciones` como una fila de `ensamble_bitacora_partner` y transiciona `estado_interno` según `resultadoFinal` — este controller es la única vía por la que `ensamble_bitacora_partner` recibe datos (ver §1.4.2 y §2, ownership actualizado).
 
 ### 1.4.4c `orquestador-app` — `client/wms`
 
@@ -212,8 +212,8 @@ com.siman.ensambles.unogroup
 UnoGroup no lee de base de datos — procesa lo que recibe en el body y reporta por callback.
 
 - `controller` recibe la notificación con el `payload_enriquecido` completo y el campo `accion` (`create`/`update`) en el body. Responde `202` de inmediato (siempre antes de procesar — comunicación asíncrona, ver Diseño §2.4) y delega el procesamiento a `service`, que corre después de responder.
-- `service` lee `accion` directamente del body — **nunca infiere** creación vs. actualización a partir de qué campos trae `payloadEnriquecido` (ver Diseño §2.4). Traduce el payload recibido, invoca `client`/`mapper`, aplica la política de reintentos síncrona de la tabla en Diseño §2.9 (backoff exponencial para 500, una vez para 401, sin reintento para 400/403/413), acumulando en memoria el detalle de cada intento (incluyendo `AUTH_TOKEN`).
-- Al terminar (éxito o fallo definitivo), invoca `callback` con el resultado final y la lista completa de intentos — este es el único momento en que UnoGroup "entrega" lo que hizo; no queda ningún registro de la ejecución dentro de `unogroup-app` una vez que el callback se envía.
+- `service` lee `accion` directamente del body — **nunca infiere** creación vs. actualización a partir de qué campos trae `payloadEnriquecido` (ver Diseño §2.4). Traduce el payload recibido, invoca `client`/`mapper`, aplica la política de reintentos síncrona de la tabla en Diseño §2.9 (backoff exponencial para 500, una vez para 401, sin reintento para 400/403/413). Cada llamada real (auth + upload) se captura como una transacción HTTP genérica (`CapturingFeignClient`, envoltorio único sobre el `Client` de Feign — method/url/headers/body enmascarados, response o error) — `service` solo anexa la metadata de negocio (secuencia/proposito/esReintento).
+- Al terminar (éxito o fallo definitivo), invoca `callback` con el resultado final y la lista completa de `transacciones` (contrato v3) — este es el único momento en que UnoGroup "entrega" lo que hizo; no queda ningún registro de la ejecución dentro de `unogroup-app` una vez que el callback se envía.
 
 ### 1.4.7 `unogroup-app` — `client` / `dto` / `mapper`
 
@@ -260,15 +260,15 @@ public class SolutionOneFileNaming {
 }
 ```
 
-**El resultado se persiste en `nombre_archivo`** (columna de `ensamble_solicitud`, ver §2/§3) — el Orquestador lo recibe de vuelta en el callback (`ResultadoSolicitud`, aunque hoy ese schema no incluye explícitamente el nombre de archivo generado — ⚠ pendiente agregarlo si se necesita para trazabilidad exacta de qué archivo corresponde a cada intento).
+**Resuelto 2026-07-29 (v3):** el nombre de archivo generado ya no se persiste como columna propia (`ensamble_solicitud.nombre_archivo` y `ensamble_bitacora_partner.nombre_archivo` se eliminaron) — el `path` completo, filename incluido, viaja embebido en `request.url` de la transacción `UPLOAD_CREATE`/`UPLOAD_UPDATE` correspondiente dentro de `ResultadoSolicitud.transacciones[]` (contrato v3). Extraer el nombre limpio desde ahí (si se necesita) requiere conocer el algoritmo `SolutionOneFileNaming` — se hace en un helper de aplicación, no en SQL ni en el contrato.
 
 
 
-- Traduce el `payload_enriquecido` recibido (lenguaje Siman) al formato binario que espera Solution One, vía `mapper`. El resultado de esa transformación se incluye en el callback (campo `payloadPartner`) para que el Orquestador lo persista — UnoGroup ya no lo guarda él mismo en ningún lado, solo lo reporta.
+- Traduce el `payload_enriquecido` recibido (lenguaje Siman) al formato binario que espera Solution One, vía `mapper`. El resultado de esa transformación (`request.body`) se incluye en la transacción HTTP correspondiente dentro del callback — es, literalmente, el `request.body` que `CapturingFeignClient` captura (sin enmascarar, limitación conocida) y que `service` reporta dentro de `transacciones[]`; ya no existe una columna `payload_partner` separada en `ensamble_solicitud` (v3), UnoGroup no lo guarda él mismo en ningún lado, solo lo reporta.
 
-**Mapeo de campos** (`Campo API` → `Campo Solution One`, ver Diseño §4.4 para los JSON de ejemplo completos):
+**Mapeo de campos** (`Campo API` → `Campo Solution One`, ver Diseño §4.4 para los JSON de ejemplo completos — este mapeo define el contenido de `request.body` en cada transacción `UPLOAD_CREATE`/`UPLOAD_UPDATE`, no una columna `payload_partner` propia, eliminada en v3):
 
-| Campo API (`payload_enriquecido`) | Campo Solution One (`payload_partner`) | Solo creación |
+| Campo API (`payload_enriquecido`) | Campo Solution One (`request.body`) | Solo creación |
 |---|---|---|
 | `ordenId` | `external_reference` | No |
 | `numeroFactura` | `external_reference_alt_1` | Sí |
@@ -316,7 +316,7 @@ public class SolutionOneFileNaming {
 | Máximo de intentos | 5 |
 | Backoff inicial | 500 ms |
 | Multiplicador | 2 (500ms → 1s → 2s → 4s → 8s ≈ 15.5s en total) |
-| Si se agotan los 5 intentos | Se registra en logs a nivel `ERROR`, en formato estructurado (incluyendo `ordenId`, `sku`, `resultadoFinal` y el detalle completo de `intentos[]`) — no se descarta el resultado, queda recuperable manualmente desde logs aunque no exista un estado consultable en base de datos. |
+| Si se agotan los 5 intentos | Se registra en logs a nivel `ERROR`, en formato estructurado (incluyendo `ordenId`, `sku`, `resultadoFinal` y el detalle completo de `transacciones[]`) — no se descarta el resultado, queda recuperable manualmente desde logs aunque no exista un estado consultable en base de datos. |
 
 - La reconciliación (zona 3, Diseño §2.11 / Bitácora de Diseño F16) sigue siendo necesaria como red de seguridad final — este reintento reduce drásticamente la probabilidad de llegar a esa zona (cubre blips transitorios, que son la inmensa mayoría de los casos), pero no la elimina: si `orquestador-app` está caído más de ~15.5s seguidos, el callback se agota igual y la reconciliación es lo único que queda.
 
@@ -325,6 +325,8 @@ public class SolutionOneFileNaming {
 # 2. DDL MySQL
 
 **Módulo:** `orquestador-app` — el DDL en sí no vive en un módulo Maven (es SQL, no Java), pero se versiona junto al código de `orquestador-app` porque describe exactamente las entidades que ese módulo expone. Único módulo con acceso a esta base de datos (ver §1.1).
+
+**Estado físico (Flyway):** el script consolidado de abajo es el **estado final v3**, para lectura de referencia — el schema real se construye incrementalmente vía `src/main/resources/db/migration/`: `V1__init.sql` (schema original), `V2__rename_tables_ensamble_prefix.sql` (prefijo `ensamble_`), `V3__drop_ensamble_solicitud_fecha_columns.sql` (elimina 5 columnas de fecha nunca acordadas en el diseño), `V4__recreate_ensamble_bitacora_partner_v3.sql` (`DROP`+`CREATE` de `ensamble_bitacora_partner` al modelo `transacciones[]`) y `V5__drop_ensamble_solicitud_payload_partner_nombre_archivo.sql` (elimina `payload_partner`/`nombre_archivo`, redundantes frente a `ensamble_bitacora_partner` v3). Flyway no permite editar una migración ya versionada, así que cada cambio de schema se agrega como archivo nuevo, nunca modificando `V1`/`V2`/etc. in situ.
 
 ```sql
 -- ============================================================
@@ -366,10 +368,10 @@ CREATE TABLE ensamble_solicitud (
     -- marcar ENRIQUECIDA; es lo que lee unogroup-app para armar la petición
     -- a Solution One (no lee payload_origen directamente).
     payload_enriquecido JSON,
-    -- Resultado ya transformado a formato Solution One — lo que efectivamente
-    -- se serializó y subió. Lo escribe unogroup-app, auditoría de qué se envió.
-    payload_partner     JSON,
-    nombre_archivo      VARCHAR(120),
+    -- payload_partner y nombre_archivo se eliminaron en v3 (V5__drop_...):
+    -- quedaban redundantes frente a ensamble_bitacora_partner, que ahora
+    -- captura esta información por transacción (request_body/request_url
+    -- de la última UPLOAD_CREATE/UPLOAD_UPDATE).
     fecha_creacion      TIMESTAMP(6)    NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     fecha_actualizacion TIMESTAMP(6)    NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
 
@@ -434,63 +436,92 @@ CREATE TABLE ensamble_solicitud_historial (
 CREATE INDEX ix_ensamble_historial_solicitud ON ensamble_solicitud_historial (solicitud_id);
 
 -- ----------------------------------------------------------
--- Bitácora HTTP hacia Solution One. Escritura exclusiva de
--- orquestador-app, poblada a partir del callback que reporta
--- unogroup-app (unogroup-app no tiene acceso a base de datos —
--- reporta, no escribe).
--- Sin columna `ambiente` (eliminada en v2 — ver Diseño §2.6,
--- el perfil stub ya no existe).
--- Sin solicitud_reintento (eliminada en v2 — reintentos
--- síncronos en el mismo hilo, ver Diseño §2.11).
+-- Bitácora de transacciones HTTP hacia Solution One — modelo v3
+-- (transacción genérica request/response/error). Reemplaza el
+-- modelo v2 de columnas sueltas y acopladas a Solution One
+-- (tipo_peticion, url, metodo_http, codigo_http, respuesta_body,
+-- intento_num, exitoso) — no retrocompatible, recreada con
+-- DROP TABLE + CREATE TABLE (V4__recreate_ensamble_bitacora_partner_v3.sql).
+-- Escritura exclusiva de orquestador-app, poblada a partir del
+-- callback que reporta unogroup-app (unogroup-app no tiene acceso a
+-- base de datos — reporta, no escribe).
 --
--- Nota: `url`/`metodo_http` son NOT NULL aquí, pero el contrato del
--- callback (Diseño §2.4) nunca los provee — ver Bitácora de
--- Implementación §2.1 para el workaround actual y el pendiente real.
+-- Resuelve la discrepancia de NOT NULL de v2 (Diseño F8): request_url/
+-- request_method son NOT NULL igual que antes url/metodo_http, pero en
+-- v3 son obligatorios en el contrato (HttpRequest.required) — ya no
+-- hace falta el workaround de hardcodear "N/D" (ver Bitácora de
+-- Implementación §2.1, resuelto).
 -- ----------------------------------------------------------
 CREATE TABLE ensamble_bitacora_partner (
-    id                  BIGINT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
-    solicitud_id        BIGINT,
-    orden_id            VARCHAR(32),
-    sku                 VARCHAR(50),
+    id                      BIGINT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
 
-    tipo_peticion       VARCHAR(20)     NOT NULL,   -- 'AUTH_TOKEN' | 'UPLOAD_CREATE' | 'UPLOAD_UPDATE'
-    nombre_archivo      VARCHAR(120),
+    -- orden_id/sku dejan de ser nullable en v3 — viven siempre en
+    -- ResultadoSolicitud (nivel superior), así que toda transacción,
+    -- incluidas las de AUTH_TOKEN, ya viene asociada a una orden/sku.
+    solicitud_id            BIGINT          NOT NULL,
+    orden_id                VARCHAR(32)     NOT NULL,
+    sku                     VARCHAR(50)     NOT NULL,
 
-    url                 VARCHAR(500)    NOT NULL,   -- ver nota arriba
-    metodo_http         VARCHAR(10)     NOT NULL,   -- ver nota arriba
+    -- Metadata SIMAN (TransaccionMetadata) — clasificación interna,
+    -- no forma parte del intercambio HTTP en sí.
+    secuencia               SMALLINT        NOT NULL,
+    proposito               VARCHAR(20)     NOT NULL,   -- 'AUTH_TOKEN' | 'UPLOAD_CREATE' | 'UPLOAD_UPDATE'
+    es_reintento            CHAR(1)         NOT NULL DEFAULT 'N',
 
-    codigo_http         SMALLINT,
-    duracion_ms         INT,
-    respuesta_body      VARCHAR(1000),
-    error_mensaje       VARCHAR(500),
+    -- Request (HttpRequest) — siempre presente.
+    request_method          VARCHAR(10)     NOT NULL,
+    request_url             VARCHAR(500)    NOT NULL,   -- enmascarada (query string)
+    request_timestamp       TIMESTAMP(6)    NOT NULL,
+    request_content_type    VARCHAR(100),
+    request_headers         JSON,                        -- enmascarados (lista fija de nombres sensibles)
+    request_body            MEDIUMTEXT,                  -- SIN enmascarar (limitación conocida v3)
 
-    intento_num         TINYINT         NOT NULL DEFAULT 1,
-    es_reintento        CHAR(1)         NOT NULL DEFAULT 'N',
-    exitoso             CHAR(1)         NOT NULL DEFAULT 'N',
+    -- Response (HttpResponse) — presente solo si hubo respuesta HTTP
+    -- válida; NULL en conjunto si la transacción terminó en error.
+    response_status_code    SMALLINT,
+    response_timestamp      TIMESTAMP(6),
+    response_duration_ms    INT,
+    response_content_type   VARCHAR(100),
+    response_headers        JSON,                        -- enmascarados
+    response_body           MEDIUMTEXT,                  -- SIN enmascarar (limitación conocida v3)
 
-    fecha_peticion      TIMESTAMP(6)    NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    -- Error (TransaccionError) — presente solo si NO hubo respuesta HTTP
+    -- válida (timeout, red, DNS, serialización previa al envío).
+    error_tipo               VARCHAR(30),    -- 'TIMEOUT' | 'CONEXION_RECHAZADA' | 'DNS' | 'SERIALIZACION' | 'DESCONOCIDO'
+    error_mensaje            VARCHAR(500),
+    error_timestamp          TIMESTAMP(6),
+    error_duration_ms        INT,
+
+    fecha_registro           TIMESTAMP(6)    NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
 
     CONSTRAINT fk_ensamble_bitacora_solicitud
         FOREIGN KEY (solicitud_id) REFERENCES ensamble_solicitud (id),
 
-    CONSTRAINT ck_ensamble_bitacora_tipo
-        CHECK (tipo_peticion IN ('AUTH_TOKEN', 'UPLOAD_CREATE', 'UPLOAD_UPDATE')),
-
-    CONSTRAINT ck_ensamble_bitacora_metodo
-        CHECK (metodo_http IN ('GET', 'POST')),
-
-    CONSTRAINT ck_ensamble_bitacora_exitoso
-        CHECK (exitoso IN ('S', 'N')),
+    CONSTRAINT ck_ensamble_bitacora_proposito
+        CHECK (proposito IN ('AUTH_TOKEN', 'UPLOAD_CREATE', 'UPLOAD_UPDATE')),
 
     CONSTRAINT ck_ensamble_bitacora_reintento
-        CHECK (es_reintento IN ('S', 'N'))
+        CHECK (es_reintento IN ('S', 'N')),
+
+    CONSTRAINT ck_ensamble_bitacora_error_tipo
+        CHECK (error_tipo IS NULL OR error_tipo IN ('TIMEOUT', 'CONEXION_RECHAZADA', 'DNS', 'SERIALIZACION', 'DESCONOCIDO')),
+
+    -- response_status_code y error_tipo son mutuamente excluyentes:
+    -- exactamente uno de los dos debe estar presente por fila.
+    CONSTRAINT ck_ensamble_bitacora_response_xor_error
+        CHECK (
+            (response_status_code IS NOT NULL AND error_tipo IS NULL)
+            OR
+            (response_status_code IS NULL AND error_tipo IS NOT NULL)
+        )
 
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-  COMMENT='Bitácora de peticiones HTTP hacia Solution One. Escritura exclusiva de orquestador-app, poblada a partir del callback de unogroup-app.';
+  COMMENT='Bitácora de transacciones HTTP hacia el partner de ensamble (formato genérico request/response/error). Escritura exclusiva de orquestador-app, poblada a partir del callback de unogroup-app.';
 
-CREATE INDEX ix_ensamble_bitacora_solicitud     ON ensamble_bitacora_partner (solicitud_id);
-CREATE INDEX ix_ensamble_bitacora_orden_sku     ON ensamble_bitacora_partner (orden_id, sku);
-CREATE INDEX ix_ensamble_bitacora_exitoso_fecha ON ensamble_bitacora_partner (exitoso, fecha_peticion);
+CREATE INDEX ix_ensamble_bitacora_solicitud    ON ensamble_bitacora_partner (solicitud_id);
+CREATE INDEX ix_ensamble_bitacora_orden_sku    ON ensamble_bitacora_partner (orden_id, sku);
+CREATE INDEX ix_ensamble_bitacora_status_fecha ON ensamble_bitacora_partner (response_status_code, fecha_registro);
+CREATE INDEX ix_ensamble_bitacora_proposito    ON ensamble_bitacora_partner (proposito);
 
 -- ============================================================
 -- Notas de diseño para el equipo de implementación:
@@ -508,8 +539,11 @@ CREATE INDEX ix_ensamble_bitacora_exitoso_fecha ON ensamble_bitacora_partner (ex
 --    en Spring y se traduce a resultado idempotente (no HTTP 409 — el
 --    consumer de Pub/Sub no expone códigos HTTP de negocio al publicador).
 --
--- 2. payload_origen / payload_partner usan JSON nativo de MySQL 8.0+,
---    que valida el formato automáticamente en INSERT/UPDATE.
+-- 2. payload_origen / payload_enriquecido / request_headers / response_headers
+--    usan JSON nativo de MySQL 8.0+, que valida el formato automáticamente
+--    en INSERT/UPDATE. request_body/response_body son MEDIUMTEXT (hasta
+--    16MB), no JSON — capturan el body completo tal cual, sin asumir que
+--    sea JSON válido (contrato genérico, no acoplado a un partner).
 --
 -- 3. Todas las fechas se almacenan en UTC. Configurar el DataSource
 --    con serverTimezone=UTC en la URL JDBC en ambas apps.
@@ -524,7 +558,9 @@ CREATE INDEX ix_ensamble_bitacora_exitoso_fecha ON ensamble_bitacora_partner (ex
 --
 -- 6. Pendiente de definir antes de Fase 1 final: TTL/purga de
 --    ensamble_solicitud_historial y ensamble_bitacora_partner (retención de datos
---    no definida aún como requerimiento).
+--    no definida aún como requerimiento) — más urgente en v3, porque
+--    capturar el body completo de cada transacción aumenta
+--    significativamente el volumen frente al modelo v2.
 -- ============================================================
 ```
 
@@ -583,12 +619,9 @@ public class SolicitudEnsamble {
     @Column(name = "payload_enriquecido", columnDefinition = "json")
     private String payloadEnriquecido;
 
-    @Lob
-    @Column(name = "payload_partner", columnDefinition = "json")
-    private String payloadPartner;
-
-    @Column(name = "nombre_archivo", length = 120)
-    private String nombreArchivo;
+    // payloadPartner/nombreArchivo se eliminaron en v3 — ver
+    // ensamble_bitacora_partner (request_body/request_url de la última
+    // transacción UPLOAD_CREATE/UPLOAD_UPDATE).
 
     @Column(name = "fecha_creacion", nullable = false, updatable = false)
     private Instant fechaCreacion;
@@ -659,6 +692,11 @@ import jakarta.persistence.*;
 import lombok.*;
 import java.time.Instant;
 
+/**
+ * Bitácora de transacciones HTTP hacia el partner de ensamble — modelo v3
+ * (transacción genérica request/response/error), reemplaza el modelo v2 de
+ * columnas sueltas (tipoPeticion/url/metodoHttp/codigoHttp/exitoso...).
+ */
 @Entity
 @Table(name = "ensamble_bitacora_partner")
 @Getter @Setter
@@ -669,54 +707,82 @@ public class BitacoraPartner {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // Referencia opcional — puede ser null en peticiones de autenticación
-    // (token) que no corresponden a una orden específica.
-    @Column(name = "solicitud_id")
+    // Ya no es opcional en v3 — orden_id/sku viven siempre en
+    // ResultadoSolicitud (nivel superior), toda transacción viene asociada.
+    @Column(name = "solicitud_id", nullable = false)
     private Long solicitudId;
 
-    @Column(name = "orden_id", length = 32)
+    @Column(name = "orden_id", nullable = false, length = 32)
     private String ordenId;
 
-    @Column(name = "sku", length = 50)
+    @Column(name = "sku", nullable = false, length = 50)
     private String sku;
 
-    @Column(name = "tipo_peticion", nullable = false, length = 20)
-    private String tipoPeticion;         // AUTH_TOKEN | UPLOAD_CREATE | UPLOAD_UPDATE
+    // SMALLINT en el DDL -> Short, no Integer (ddl-auto: validate exige el
+    // tipo exacto — mismo patrón que responseStatusCode más abajo).
+    @Column(name = "secuencia", nullable = false)
+    private Short secuencia;
 
-    @Column(name = "nombre_archivo", length = 120)
-    private String nombreArchivo;
+    @Column(name = "proposito", nullable = false, length = 20)
+    private String proposito;   // AUTH_TOKEN | UPLOAD_CREATE | UPLOAD_UPDATE
 
-    @Column(name = "url", nullable = false, length = 500)
-    private String url;
+    @Column(name = "es_reintento", nullable = false, length = 1)
+    private String esReintento;   // 'S' | 'N'
 
-    @Column(name = "metodo_http", nullable = false, length = 10)
-    private String metodoHttp;
+    @Column(name = "request_method", nullable = false, length = 10)
+    private String requestMethod;
 
-    @Column(name = "codigo_http")
-    private Short codigoHttp;
+    @Column(name = "request_url", nullable = false, length = 500)
+    private String requestUrl;
 
-    @Column(name = "duracion_ms")
-    private Integer duracionMs;
+    @Column(name = "request_timestamp", nullable = false)
+    private Instant requestTimestamp;
 
-    @Column(name = "respuesta_body", length = 1000)
-    private String respuestaBody;
+    @Column(name = "request_content_type", length = 100)
+    private String requestContentType;
+
+    @Lob
+    @Column(name = "request_headers", columnDefinition = "json")
+    private String requestHeaders;
+
+    @Lob
+    @Column(name = "request_body", columnDefinition = "mediumtext")
+    private String requestBody;
+
+    @Column(name = "response_status_code")
+    private Short responseStatusCode;
+
+    @Column(name = "response_timestamp")
+    private Instant responseTimestamp;
+
+    @Column(name = "response_duration_ms")
+    private Integer responseDurationMs;
+
+    @Column(name = "response_content_type", length = 100)
+    private String responseContentType;
+
+    @Lob
+    @Column(name = "response_headers", columnDefinition = "json")
+    private String responseHeaders;
+
+    @Lob
+    @Column(name = "response_body", columnDefinition = "mediumtext")
+    private String responseBody;
+
+    @Column(name = "error_tipo", length = 30)
+    private String errorTipo;   // TIMEOUT | CONEXION_RECHAZADA | DNS | SERIALIZACION | DESCONOCIDO
 
     @Column(name = "error_mensaje", length = 500)
     private String errorMensaje;
 
-    @Column(name = "intento_num", nullable = false)
-    private Byte intentoNum;   // Byte, no Integer — coincide con el tipo TINYINT del DDL;
-                               // Hibernate exige el tipo exacto cuando valida el schema
-                               // contra la columna existente (ddl-auto: validate).
+    @Column(name = "error_timestamp")
+    private Instant errorTimestamp;
 
-    @Column(name = "es_reintento", nullable = false, length = 1)
-    private String esReintento;          // 'S' | 'N'
+    @Column(name = "error_duration_ms")
+    private Integer errorDurationMs;
 
-    @Column(name = "exitoso", nullable = false, length = 1)
-    private String exitoso;              // 'S' | 'N'
-
-    @Column(name = "fecha_peticion", nullable = false, updatable = false)
-    private Instant fechaPeticion;
+    @Column(name = "fecha_registro", nullable = false, updatable = false)
+    private Instant fechaRegistro;
 }
 ```
 
@@ -767,7 +833,7 @@ public enum TrackingStatus {
 }
 ```
 
-**Nota:** estos enums están duplicados, no se comparten vía un módulo Maven — la fuente de verdad es el contrato OpenAPI (`HUENSA-001_openapi_V2.yaml`), donde los mismos valores están declarados como `enum:` en los schemas correspondientes; conviene validar contra ese archivo, no asumir que el código Java de una app es la referencia para la otra. El riesgo de desincronización entre ambas copias, y el trade-off frente a compartirlas vía módulo común, está documentado en la Bitácora de Implementación §2.3.
+**Nota:** estos enums están duplicados, no se comparten vía un módulo Maven — la fuente de verdad es el contrato OpenAPI (`HUENSA-001_openapi_V3.yaml`), donde los mismos valores están declarados como `enum:` en los schemas correspondientes; conviene validar contra ese archivo, no asumir que el código Java de una app es la referencia para la otra. El riesgo de desincronización entre ambas copias, y el trade-off frente a compartirlas vía módulo común, está documentado en la Bitácora de Implementación §2.3.
 
 ---
 
@@ -962,7 +1028,7 @@ ensambles:
 
   # Cliente de callback hacia orquestador-app — ver Diseño §2.4, §1.4.8
   # de este documento. Se invoca al terminar de procesar, con el
-  # resultado final y el detalle de cada intento (incluyendo AUTH_TOKEN).
+  # resultado final y las transacciones[] (incluyendo AUTH_TOKEN).
   callback:
     orquestador-url: ${ORQUESTADOR_APP_URL:http://svc-orquestador.ensambles.svc.cluster.local}
     # Más intentos que el reintento corto de la notificación entrante
@@ -1634,11 +1700,11 @@ images:
 
 # 9. Trabajo pendiente
 
-Lo que sigue son los puntos que hoy afectan el código y siguen sin cerrar. El historial completo de cómo se llegó a este estado — hallazgos de auditoría, correcciones sobre versiones previas de este documento, y los ítems ya resueltos — vive en `HUENSA-001_Bitacora_Decisiones_Implementacion_Modulo_Integracion_Ensamble.md` §4. Las preguntas que dependen de un tercero o de una decisión de negocio/arquitectura (no solo de escribir código) están en la Bitácora de Diseño, Índice Maestro de Preguntas Abiertas (`F1`–`F20`, `A1`–`A7`, `C1`–`C7`).
+Lo que sigue son los puntos que hoy afectan el código y siguen sin cerrar. El historial completo de cómo se llegó a este estado — hallazgos de auditoría, correcciones sobre versiones previas de este documento, y los ítems ya resueltos — vive en `HUENSA-001_Implementacion_Bitacora_Decisiones_Modulo_Integracion_Ensamble.md` §4. Las preguntas que dependen de un tercero o de una decisión de negocio/arquitectura (no solo de escribir código) están en la Bitácora de Diseño, Índice Maestro de Preguntas Abiertas (`F1`–`F20`, `A1`–`A7`, `C1`–`C7`).
 
 1. Construir el ruteo real de `actualizacion` para `origen=guias` (§1.4.1) — hoy siempre se trata como creación.
 2. Construir el paquete `reconciliation` (§1.4.5) — hoy no existe en el código.
-3. Decidir si se agrega `url`/`metodoHttp` al contrato del callback o se relaja el `NOT NULL` de `ensamble_bitacora_partner` (§2, §3) — ver Diseño F8.
+3. ~~Decidir si se agrega `url`/`metodoHttp` al contrato del callback o se relaja el `NOT NULL` de `ensamble_bitacora_partner` (§2, §3)~~ — **Resuelto 2026-07-29 vía v3:** el contrato v3 (`ResultadoSolicitud.transacciones[]`) reemplaza `intentos[]` por completo con un modelo de transacción HTTP genérica; `request.method`/`request.url` son obligatorios, así que `request_method`/`request_url` (`ensamble_bitacora_partner`) siempre se pueblan con valores reales. `ensamble_bitacora_partner` se recreó (`V4__recreate_ensamble_bitacora_partner_v3.sql`) y `BitacoraPartner`/`SolicitudEnsamble` (esta última pierde `payloadPartner`/`nombreArchivo`) se actualizaron. ~~**Pendiente real remanente:** `unogroup-app` debía implementar el interceptor de captura de transacciones HTTP.~~ — **Resuelto (confirmado 2026-07-30):** `unogroup-app` implementa el interceptor vía `CapturingFeignClient` (envoltorio sobre el `Client` de Feign — method/url/headers/body enmascarados, response o error), ver §1.4.6 de este documento.
 4. `EventoGuiasMapper` — comportamiento exacto si `items[]` viene vacío o con SKUs duplicados dentro del mismo evento.
 5. Autenticación y política de reintento de `WmsShipmentClient` (§1.4.4c) — sin definir.
 6. Agregar validación `@Size` a los DTOs de entrada de `unogroup-app`, para reflejar los `maxLength` del contrato OpenAPI.
@@ -1648,4 +1714,7 @@ Lo que sigue son los puntos que hoy afectan el código y siguen sin cerrar. El h
 10. Autenticación de los endpoints internos de notificación y callback (hoy deshabilitada en ambos sentidos) — ver Diseño F8.
 11. Cómo detecta la reconciliación la zona 3 (UnoGroup procesó pero el callback se perdió) — ver Diseño F16, bloqueado además por el ítem 2 de esta lista.
 12. Schema del mensaje de Tracking/Beetrack (actualización de entrega) — ver Diseño F13.
-13. Reflejar `respuesta_body`/`error_mensaje` de `ensamble_bitacora_partner` (§2, §3) en el diagrama entidad-relación de Requerimientos §2.6.1 — hoy documentadas aquí pero no en el ER aprobado.
+13. ~~Reflejar `respuesta_body`/`error_mensaje` de `ensamble_bitacora_partner` (§2, §3) en el diagrama entidad-relación de Requerimientos §2.6.1~~ — sin objeto tras v3: esas columnas puntuales del modelo v2 ya no existen; el ER de Requerimientos §2.6.1 ya refleja el modelo v3 completo (`request_*`/`response_*`/`error_*`).
+14. Confirmar con el equipo de Diseño si `SolutionOneCreatePayload`/`SolutionOneUpdatePayload` (openapi) se mantienen como documentación de referencia del formato esperado dentro de `request.body`, o se retiran del contrato por quedar sin uso formal (`oneOf`) ya que `body` es ahora un string genérico.
+15. Implementar la consulta de "último payload enviado"/"último archivo usado" desde `ensamble_bitacora_partner` (guía §4.3) — no agregada todavía porque ningún flujo actual de `orquestador-app` lee `payload_partner`/`nombre_archivo` (se confirmó al migrar); agregar cuando exista un consumidor real.
+16. Definir política de retención/TTL para `ensamble_bitacora_partner` — más urgente en v3 por capturar bodies completos (mismo punto abierto que ya existía en v2, ver nota 6 del DDL en §2).

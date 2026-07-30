@@ -2,13 +2,19 @@ openapi: 3.0.3
 
 info:
   title: Módulo de Integración de Servicios de Ensamble
-  version: "2.1.0-borrador"
+  version: "3.0.0-borrador"
   description: >
     Contrato de la API del sistema de Ensambles: recepción de eventos de origen,
     consulta de trazabilidad, y comunicación asíncrona entre el Orquestador
     (único con acceso a base de datos) y el microservicio de Comunicación
     con UnoGroup (sin estado propio — recibe el contenido completo y reporta
     el resultado por separado).
+
+    **Cambio de ruptura en esta versión (3.0.0):** `ResultadoSolicitud`
+    reemplaza el arreglo `intentos[]` (campos HTTP sueltos, acoplados al
+    partner Solution One) por `transacciones[]`, un modelo genérico de
+    transacción HTTP (`metadata` + `request` + `response`/`error`) — ver
+    guía de migración `HUENSA-001_Guia_Contrato_Transacciones_HTTP.md`.
 
     Los endpoints se agrupan en tres categorías (tags):
       - `ingesta`: recibe eventos de los sistemas de origen (WMS, Guías Manuales,
@@ -169,9 +175,10 @@ paths:
       description: >
         Se invoca una sola vez, al terminar de procesar una solicitud —
         con éxito o tras agotar los reintentos sin éxito. Incluye el
-        resultado final y el detalle de cada intento HTTP realizado
-        (incluyendo la obtención o renovación de credenciales, no solo
-        los intentos de envío).
+        resultado final y el registro completo de cada transacción HTTP
+        realizada (incluyendo la obtención o renovación de credenciales,
+        no solo las de envío del contenido) — ver `ResultadoSolicitud` y
+        `TransaccionHttp`.
 
         Quien recibe este resultado no vuelve a tener contacto con la
         ejecución que lo produjo — no hay estado intermedio ni forma de
@@ -728,7 +735,7 @@ components:
 
     ResultadoSolicitud:
       type: object
-      required: [ordenId, sku, resultadoFinal, intentos]
+      required: [ordenId, sku, resultadoFinal, transacciones]
       properties:
         ordenId:
           type: string
@@ -739,60 +746,200 @@ components:
         resultadoFinal:
           type: string
           enum: [ENVIADA_PARTNER, ACEPTADA_PARTNER, RECHAZADA_PARTNER]
-        nombreArchivo:
-          type: string
-          maxLength: 120
-          nullable: true
-          description: >
-            Path/nombre del archivo generado para esta solicitud (algoritmo
-            SolutionOneFileNaming.construirPath) — el mismo para todos los
-            intentos de tipo UPLOAD_* de este resultado. Se persiste en
-            ensamble_solicitud.nombre_archivo.
-        intentos:
+        transacciones:
           type: array
           description: >
-            Detalle de cada intento HTTP realizado durante el procesamiento,
-            en orden — incluye tanto los intentos de obtención/renovación de
-            credenciales como los de envío del contenido.
+            Registro completo de cada llamada HTTP realizada durante el
+            procesamiento de esta solicitud, en el orden en que ocurrieron
+            — incluye tanto la obtención/renovación de credenciales
+            (`AUTH_TOKEN`) como el envío del contenido (`UPLOAD_CREATE`/
+            `UPLOAD_UPDATE`). Se modela como transacciones HTTP genéricas
+            (request/response/error), sin acoplar el formato a Solution One
+            ni a ningún partner específico — el objetivo es que el detalle
+            de cada llamada se pueda leer y compartir con el equipo técnico
+            del partner en un vocabulario estándar (método, URL, headers,
+            body, código de estado), no solo en las categorías internas de
+            SIMAN. Ver `TransaccionHttp`.
           items:
-            type: object
-            required: [numero, tipoPeticion, url, metodoHttp, exitoso]
-            properties:
-              numero:
-                type: integer
-                minimum: 1
-              tipoPeticion:
-                type: string
-                enum: [AUTH_TOKEN, UPLOAD_CREATE, UPLOAD_UPDATE]
-              url:
-                type: string
-                maxLength: 500
-                description: URL exacta invocada en Solution One para este intento.
-              metodoHttp:
-                type: string
-                enum: [GET, POST]
-              codigoHttp:
-                type: integer
-                nullable: true
-              duracionMs:
-                type: integer
-                nullable: true
-              esReintento:
-                type: boolean
-              exitoso:
-                type: boolean
-              errorMensaje:
-                type: string
-                nullable: true
-        payloadPartner:
-          oneOf:
-            - $ref: '#/components/schemas/SolutionOneCreatePayload'
-            - $ref: '#/components/schemas/SolutionOneUpdatePayload'
+            $ref: '#/components/schemas/TransaccionHttp'
+
+    # ------------------------------------------------------------
+    # Transacción HTTP genérica — reemplaza el antiguo `intentos[]`
+    # (campos HTTP sueltos y acoplados a Solution One). Sirve para
+    # cualquier llamada saliente que el sistema necesite auditar,
+    # sin importar el partner. Ver guía de migración.
+    # ------------------------------------------------------------
+    TransaccionHttp:
+      type: object
+      required: [metadata, request]
+      description: >
+        Un único ciclo de llamada HTTP saliente. `response` está presente
+        solo si se recibió una respuesta HTTP válida; `error` está presente
+        solo si la transacción no llegó a completarse como un ciclo
+        request/response normal (timeout, conexión rechazada, error de
+        serialización antes de enviar, DNS, etc.). Son mutuamente
+        excluyentes — nunca ambos presentes, nunca ninguno.
+      properties:
+        metadata:
+          $ref: '#/components/schemas/TransaccionMetadata'
+        request:
+          $ref: '#/components/schemas/HttpRequest'
+        response:
+          allOf:
+            - $ref: '#/components/schemas/HttpResponse'
+          nullable: true
+        error:
+          allOf:
+            - $ref: '#/components/schemas/TransaccionError'
           nullable: true
           description: >
-            El contenido ya transformado al formato que espera el partner de
-            ensamble — lo que efectivamente se envió, distinto del contenido
-            en lenguaje de negocio que se recibió en la notificación.
+            Presente solo si la transacción no obtuvo una respuesta HTTP
+            válida.
+
+    TransaccionError:
+      type: object
+      required: [tipo, mensaje, timestamp]
+      description: >
+        Detalle estructurado del fallo cuando la transacción no llegó a
+        completarse como un ciclo request/response normal. Se modela con
+        el mismo nivel de detalle que `HttpResponse` (no como un string
+        plano) para no perder señales de diagnóstico — un timeout a los
+        30s y una conexión rechazada instantánea son fallos muy distintos
+        aunque ambos carezcan de `response`.
+      properties:
+        tipo:
+          type: string
+          enum: [TIMEOUT, CONEXION_RECHAZADA, DNS, SERIALIZACION, DESCONOCIDO]
+          description: >
+            Categoría del fallo — permite filtrar/agrupar la bitácora sin
+            depender de parsing de texto libre sobre `mensaje`.
+        mensaje:
+          type: string
+          description: Texto descriptivo del fallo.
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento en que se detectó el fallo.
+        durationMs:
+          type: integer
+          nullable: true
+          description: >
+            Cuánto tardó en fallar la transacción — relevante sobre todo
+            para `tipo=TIMEOUT`.
+
+    TransaccionMetadata:
+      type: object
+      required: [secuencia, proposito, esReintento]
+      description: >
+        Clasificación interna de SIMAN — no forma parte del intercambio
+        HTTP en sí. Útil para filtrar/agrupar la bitácora (ej. "solo los
+        intentos de upload"), pero sin significado para el equipo del
+        partner al leer una transacción individual.
+      properties:
+        secuencia:
+          type: integer
+          minimum: 1
+          description: >
+            Posición de esta transacción dentro del orden en que ocurrieron
+            los intentos de esta solicitud.
+        proposito:
+          type: string
+          enum: [AUTH_TOKEN, UPLOAD_CREATE, UPLOAD_UPDATE]
+          description: Para qué era la llamada, según la clasificación de negocio de SIMAN.
+        esReintento:
+          type: boolean
+          description: Si esta transacción es un reintento de una transacción anterior fallida del mismo propósito.
+
+    HttpRequest:
+      type: object
+      required: [method, url, timestamp]
+      description: >
+        Contenido real de la petición enviada. `url` y `headers` llevan
+        enmascarado de valores sensibles (ver `body` para la limitación
+        conocida de esta versión).
+      properties:
+        method:
+          type: string
+          maxLength: 10
+          example: POST
+          description: >
+            Verbo HTTP real (GET, POST, PUT, PATCH, DELETE, ...). No se
+            restringe a un enum fijo — el modelo es genérico para
+            cualquier partner futuro, no solo Solution One.
+        url:
+          type: string
+          maxLength: 500
+          description: >
+            URL completa invocada, incluyendo query string. Cualquier
+            valor sensible detectado por nombre de clave en el query
+            string (`token`, `key`, `secret`, `password` y variantes,
+            case-insensitive) se enmascara, mostrando solo los últimos
+            caracteres del valor.
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento en que se envió esta request.
+        contentType:
+          type: string
+          nullable: true
+          description: Content-Type declarado del body, si aplica (null para requests sin body, ej. AUTH_TOKEN).
+        headers:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string
+          description: >
+            Headers enviados. Los que coinciden con la lista fija de
+            nombres sensibles (`Authorization`, `Cookie`, `Set-Cookie`, y
+            cualquier header terminado en `-Key`/`-Token`/`-Secret`,
+            case-insensitive) se enmascaran, mostrando solo los últimos
+            caracteres del valor — nunca se omiten por completo, para
+            conservar la señal de que sí se envió un valor.
+        body:
+          type: string
+          nullable: true
+          description: >
+            Contenido real enviado, como texto crudo — no acoplado a
+            ningún schema de partner específico (para `proposito=AUTH_TOKEN`
+            normalmente es `null`; para `UPLOAD_CREATE`/`UPLOAD_UPDATE` es
+            el JSON serializado en formato Solution One, ver
+            `SolutionOneCreatePayload`/`SolutionOneUpdatePayload`).
+            **Limitación conocida:** a diferencia de `url` y `headers`,
+            el body NO se enmascara en esta versión — cualquier valor
+            sensible presente en el contenido queda visible tal cual.
+
+    HttpResponse:
+      type: object
+      required: [statusCode, timestamp]
+      description: Contenido real de la respuesta recibida. Ausente si la transacción terminó en `error`.
+      properties:
+        statusCode:
+          type: integer
+          description: Código de estado HTTP devuelto.
+        timestamp:
+          type: string
+          format: date-time
+          description: Momento en que se recibió la respuesta.
+        durationMs:
+          type: integer
+          nullable: true
+          description: Duración del round-trip en milisegundos.
+        contentType:
+          type: string
+          nullable: true
+        headers:
+          type: object
+          nullable: true
+          additionalProperties:
+            type: string
+          description: Headers devueltos, con el mismo criterio de enmascarado que en la request (ej. un token rotado que el partner devuelva).
+        body:
+          type: string
+          nullable: true
+          description: >
+            Contenido real de la respuesta, como texto crudo. Misma
+            limitación conocida que en `request.body`: no se enmascara en
+            esta versión.
 
     # ------------------------------------------------------------
     # Formato real de salida hacia el partner de ensamble — confirmado
@@ -836,7 +983,7 @@ components:
         tracking_status: { type: string }
         tracking_dispatched_time: { type: string, format: date-time, nullable: true }
         tracking_delivered_time: { type: string, format: date-time, nullable: true }
-ss
+
     # ------------------------------------------------------------
     # Respuesta de trazabilidad (público)
     # ------------------------------------------------------------

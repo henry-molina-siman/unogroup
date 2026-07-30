@@ -4,7 +4,7 @@
 **Documento:** principios, arquitectura, contrato público (OpenAPI), casos de uso, mapeo de campos y contrato del partner. Describe el diseño **vigente hoy**.
 **Diagrama de referencia:** `ArquitecturaDiagramaEnsambles.png` — actualizado, refleja la arquitectura de dos microservicios (§2).
 
-> **Historial de cambios, hallazgos de auditoría y preguntas abiertas:** ver `HUENSA-001_Bitacora_Decisiones_Modulo_Integracion_Ensamble.md`. Este documento solo describe el estado actual acordado; no lleva changelog ni anotaciones de sesión.
+> **Historial de cambios, hallazgos de auditoría y preguntas abiertas:** ver `HUENSA-001_Diseno_Bitacora_Decisiones_Modulo_Integracion_Ensamble.md`. Este documento solo describe el estado actual acordado; no lleva changelog ni anotaciones de sesión.
 
 **Cómo está organizado este documento:**
 1. **Por qué y hasta dónde** (§1) — el principio de diseño y el alcance acordado.
@@ -144,29 +144,45 @@ Con UnoGroup sin acceso a base de datos, el body lleva el `payload_enriquecido` 
 
 **Paso 2 — UnoGroup → Orquestador: callback con el resultado.**
 
-Al terminar de procesar (éxito, o agotar reintentos sin éxito), UnoGroup llama de vuelta al Orquestador con el resultado final y el desglose de cada intento HTTP:
+Al terminar de procesar (éxito, o agotar reintentos sin éxito), UnoGroup llama de vuelta al Orquestador con el resultado final y el registro completo de cada transacción HTTP realizada — **modelo `transacciones[]` (v3)**, que reemplaza el antiguo `intentos[]` (campos sueltos acoplados a Solution One) por una transacción HTTP genérica (`metadata` + `request` + `response`/`error`, mutuamente excluyentes):
 
 ```json
 {
   "ordenId": "SV-RET-20260415-00012",
   "sku": "9013059587",
   "resultadoFinal": "ENVIADA_PARTNER",
-  "intentos": [
-    { "numero": 1, "tipoPeticion": "AUTH_TOKEN", "codigoHttp": 200, "duracionMs": 210, "esReintento": false, "exitoso": true },
-    { "numero": 1, "tipoPeticion": "UPLOAD_CREATE", "codigoHttp": 500, "duracionMs": 842, "esReintento": false, "exitoso": false, "respuestaBody": "...", "errorMensaje": "..." },
-    { "numero": 2, "tipoPeticion": "UPLOAD_CREATE", "codigoHttp": 201, "duracionMs": 613, "esReintento": true, "exitoso": true }
+  "transacciones": [
+    {
+      "metadata": { "secuencia": 1, "proposito": "AUTH_TOKEN", "esReintento": false },
+      "request": { "method": "GET", "url": "https://data.solution1.us/api/v2/user/token", "timestamp": "2026-07-13T18:42:03.100Z", "headers": { "Authorization": "Basic ***A9x2" } },
+      "response": { "statusCode": 200, "timestamp": "2026-07-13T18:42:03.310Z", "durationMs": 210, "body": "{ \"access_token\": \"eyJ...\" }" }
+    },
+    {
+      "metadata": { "secuencia": 2, "proposito": "UPLOAD_CREATE", "esReintento": false },
+      "request": { "method": "POST", "url": "https://data.solution1.us/api/v2/user/files/upload?path=siman%2Fcreate%2F...&mkdir_parents=true", "timestamp": "2026-07-13T18:42:03.320Z", "headers": { "Authorization": "Bearer ***WT9a" }, "body": "{ ...SolutionOneCreatePayload... }" },
+      "response": { "statusCode": 500, "timestamp": "2026-07-13T18:42:04.162Z", "durationMs": 842 }
+    },
+    {
+      "metadata": { "secuencia": 3, "proposito": "UPLOAD_CREATE", "esReintento": true },
+      "request": { "method": "POST", "url": "https://data.solution1.us/api/v2/user/files/upload?path=siman%2Fcreate%2F...&mkdir_parents=true", "timestamp": "2026-07-13T18:42:05.170Z", "headers": { "Authorization": "Bearer ***WT9a" }, "body": "{ ...SolutionOneCreatePayload... }" },
+      "response": { "statusCode": 201, "timestamp": "2026-07-13T18:42:05.783Z", "durationMs": 613 }
+    }
   ]
 }
 ```
 
-- El Orquestador es quien **inserta** cada elemento de `intentos` como una fila de `ensamble_bitacora_partner`, y quien transiciona `estado_interno` según `resultadoFinal`.
+- `url`/`headers` llevan enmascarado obligatorio de valores sensibles (últimos 4 caracteres visibles); `body` **no** se enmascara todavía (limitación conocida v3).
+- El Orquestador es quien **inserta** cada elemento de `transacciones` como una fila de `ensamble_bitacora_partner`, y quien transiciona `estado_interno` según `resultadoFinal`. `exitoso` ya no viaja en el contrato ni se persiste — se deriva (`response.statusCode` entre 200 y 299).
+- **`nombreArchivo`/`payloadPartner` ya no existen como campos separados** (ni en el contrato ni en `ensamble_solicitud`) — ambos quedan embebidos en cada transacción de subida (`request.url` trae el `path`, `request.body` trae el payload real enviado) y se derivan de ahí cuando se necesitan.
 - **Por qué asíncrono y no síncrono bloqueante:** el backoff hacia Solution One puede tardar hasta ~31s en el peor caso (§2.11), y ese tiempo no necesariamente es el mismo si en el futuro se reemplaza el partner por otro con un backoff más espaciado. Mantener abierta una conexión HTTP síncrona ese tiempo no escala bien — el callback libera al Orquestador de esperar.
 
 **Consecuencias de este patrón:**
 - UnoGroup no necesita el sidecar `Cloud SQL Auth Proxy` — su huella de acceso se reduce a Secret Manager + salida HTTP hacia Solution One, nada más.
 - **Trade-off aceptado:** dos saltos de red en vez de uno (notificación + callback), y hay que manejar el caso en que el callback mismo se pierda — cubierto por el job de reconciliación (§2.11), que cubre "notificado pero sin callback recibido en X minutos", no solo "sin notificar".
 
-> ⚠ **Pendiente:** contrato exacto del endpoint de callback en el Orquestador (`POST /internal/orquestador/solicitudes/resultado` o similar), incluyendo autenticación entre servicios dentro del clúster, y si se agregan `url`/`metodoHttp` al contrato del callback para poblar esas columnas de `ensamble_bitacora_partner` (ver Bitácora, F8).
+`request.method`/`request.url` son obligatorios en el contrato para cada transacción — el callback siempre trae un método y una URL reales por intento, sin necesidad de valores por defecto.
+
+*(Autenticación entre servicios dentro del clúster para ambos endpoints internos sigue sin definirse — ver Bitácora, F8.)*
 
 ## 2.5 Interfaz de entrada (pública) — Orquestador
 
@@ -236,15 +252,25 @@ El mismo prefijo se aplica a los constraints, índices y el trigger de la tabla 
 |---|---|
 | `ensamble_solicitud` | Registro principal por sub-orden. Incluye el estado interno `ENRIQUECIDA` (§2.7) y la columna `payload_enriquecido`. |
 | `ensamble_solicitud_historial` | Registra transiciones de `estado_interno`/`tracking_status` (eventos de negocio). No duplica el detalle de cada llamada HTTP — eso vive exclusivamente en `ensamble_bitacora_partner`. |
-| `ensamble_bitacora_partner` | Única fuente de verdad de "qué pasó en cada llamada HTTP hacia Solution One" (auth, upload, reintentos) — poblada por el Orquestador a partir del callback de UnoGroup. |
+| `ensamble_bitacora_partner` | Única fuente de verdad de "qué pasó en cada transacción HTTP hacia Solution One" (auth, upload, reintentos) — poblada por el Orquestador a partir del callback de UnoGroup (`transacciones[]`, v3). |
 
-**Tres columnas de payload en `ensamble_solicitud`, separadas para no perder ninguna de las tres funciones:**
+**Dos columnas de payload en `ensamble_solicitud` (v3 — `payload_partner` se elimina, ver más abajo):**
 
 | Columna | Quién escribe | Contenido |
 |---|---|---|
 | `payload_origen` | Orquestador, una sola vez, al recibir el evento | El crudo tal como llegó — inmutable, solo para auditoría/replay |
 | `payload_enriquecido` | Orquestador, al completar el enriquecimiento | El JSON completo en lenguaje Siman, con todos los campos ya rellenados — esto es lo que se envía a UnoGroup en la notificación (§2.4) |
-| `payload_partner` | Orquestador, al recibir el callback | El resultado ya transformado a formato Solution One — UnoGroup lo reporta como parte del callback, el Orquestador lo persiste |
+
+**`payload_partner` y `nombre_archivo` se eliminan de `ensamble_solicitud` en v3** — quedaban redundantes frente a `ensamble_bitacora_partner`, que ahora captura esta información por transacción (`request_body`/`request_url` de la última `UPLOAD_CREATE`/`UPLOAD_UPDATE`), ligada al intento HTTP puntual que la generó en vez de a un único valor "actual" por sub-orden. Si algún flujo necesita "el último payload/archivo usado para esta sub-orden", se consulta desde `ensamble_bitacora_partner` en vez de leer una columna:
+
+```sql
+-- Último payload enviado (antes: ensamble_solicitud.payload_partner)
+SELECT request_body FROM ensamble_bitacora_partner
+WHERE solicitud_id = :solicitudId AND proposito IN ('UPLOAD_CREATE', 'UPLOAD_UPDATE')
+ORDER BY secuencia DESC LIMIT 1;
+```
+
+El nombre/ruta de archivo (antes `nombre_archivo`) ya no es una columna separada — viaja embebido en `request_url` (query param `path`); extraerlo requiere conocer el formato de Solution One (`SolutionOneFileNaming`), así que esa extracción vive en un helper de aplicación (`orquestador-app`), no en SQL ni en el contrato.
 
 **Estructura jerárquica interna:**
 
@@ -272,8 +298,6 @@ erDiagram
     varchar tracking_status
     json payload_origen "crudo, inmutable"
     json payload_enriquecido "lo que se envía a UnoGroup"
-    json payload_partner "reportado por UnoGroup via callback"
-    varchar nombre_archivo
     timestamp fecha_creacion
     timestamp fecha_actualizacion
   }
@@ -292,23 +316,33 @@ erDiagram
 
   ENSAMBLE_BITACORA_PARTNER {
     bigint id PK
-    bigint solicitud_id FK
-    varchar orden_id
-    varchar sku
-    varchar tipo_peticion
-    varchar nombre_archivo
-    varchar url
-    varchar metodo_http
-    smallint codigo_http
-    varchar respuesta_body "VARCHAR(1000)"
-    varchar error_mensaje "VARCHAR(500)"
-    int duracion_ms
-    tinyint intento_num
+    bigint solicitud_id FK "NOT NULL en v3"
+    varchar orden_id "NOT NULL en v3"
+    varchar sku "NOT NULL en v3"
+    smallint secuencia "antes intento_num; posición dentro del orden real de ejecución"
+    varchar proposito "antes tipo_peticion; AUTH_TOKEN/UPLOAD_CREATE/UPLOAD_UPDATE"
     char es_reintento
-    char exitoso
-    timestamp fecha_peticion
+    varchar request_method
+    varchar request_url "enmascarada, incluye el path/nombre de archivo"
+    timestamp request_timestamp
+    varchar request_content_type
+    json request_headers "enmascarados"
+    mediumtext request_body "sin enmascarar"
+    smallint response_status_code "nullable, mutuamente excluyente con error_tipo"
+    timestamp response_timestamp "nullable"
+    int response_duration_ms "nullable"
+    varchar response_content_type "nullable"
+    json response_headers "nullable, enmascarados"
+    mediumtext response_body "nullable, sin enmascarar"
+    varchar error_tipo "nullable, mutuamente excluyente con response_status_code — TIMEOUT/CONEXION_RECHAZADA/DNS/SERIALIZACION/DESCONOCIDO"
+    varchar error_mensaje "nullable, VARCHAR(500)"
+    timestamp error_timestamp "nullable"
+    int error_duration_ms "nullable"
+    timestamp fecha_registro
   }
 ```
+
+**Cambios de v3 respecto al modelo anterior:** `ensamble_bitacora_partner` reemplaza el modelo de columnas sueltas y acopladas a Solution One (`tipo_peticion`, `url`, `metodo_http`, `codigo_http`, `respuesta_body`, `intento_num`, `exitoso`) por una transacción HTTP genérica (`request_*`/`response_*`/`error_*`), válida para cualquier partner futuro — `exitoso` ya no se persiste, se deriva de `response_status_code BETWEEN 200 AND 299` (o de la presencia de `error_tipo`, si no hubo respuesta); `response_*` y `error_tipo` son mutuamente excluyentes (reforzado con `CHECK`). `orden_id`/`sku` dejan de ser nullable — en el contrato v3 viven siempre en `ResultadoSolicitud` (nivel superior), así que toda transacción, incluidas las de `AUTH_TOKEN`, ya viene asociada a una orden/sku. `ensamble_solicitud` pierde `payload_partner` y `nombre_archivo` (ver más arriba).
 
 **Dueño de escritura por tabla:**
 
@@ -407,8 +441,6 @@ El contrato documentado (PTI-IRRIS-16) solo cubre el sentido Siman → Solution 
 - Frecuencia: infrecuente (orden de 15-30 min) — no es un mecanismo de tiempo real, es una red de seguridad para el caso raro donde el camino feliz (evento + notificación + callback) falló por completo.
 - **No se usa el DLQ de Pub/Sub como mecanismo de alerta.** El tópico de entrada sí tiene (o debería tener) una Dead Letter Queue configurada para mensajes que agotan reintentos de entrega, pero hoy es solo un buzón sin monitoreo activo — el job de reconciliación sobre `estado_interno` es la red de seguridad real, no el DLQ.
 - MySQL sigue siendo la fuente de verdad para el Orquestador en todos los casos: la llamada HTTP y el DLQ son disparadores para evitar polling constante, no el lugar donde vive el dato. Esto no aplica de la misma forma a UnoGroup, que no tiene base de datos — su única fuente de verdad sobre un intento en curso es su propia memoria de proceso mientras dura la ejecución.
-
-> **Nota de estado de implementación:** ver Bitácora para el estado real de este job contra el código desplegado.
 
 ---
 
@@ -542,7 +574,7 @@ Mismo patrón que CARM/TARM — 1 evento por formulario/orden, con `items[]`; el
 
 **Propósito:** para cada campo requerido por el contrato de Solution One (PTI-IRRIS-16), identificar su equivalente en la API del módulo (lenguaje Siman/español), el campo del sistema origen, y cómo obtenerlo si el origen no lo tiene disponible directamente.
 
-> **Sobre el estado del contrato:** el nombre y tipo de cada campo "Campo API (español)" de estas tablas ya está fijado en `HUENSA-001_openapi_V2.yaml` (schemas `PayloadEnriquecido`/`EventoGuias`) — eso es el contrato, y está definido. Lo que marca `desconocido` en la columna "Fuente / Cómo obtenerlo" es si el sistema origen realmente captura ese dato y de dónde sale — una confirmación de negocio pendiente con el equipo dueño del origen, independiente de que el campo ya tenga nombre en la API.
+> **Sobre el estado del contrato:** el nombre y tipo de cada campo "Campo API (español)" de estas tablas ya está fijado en `HUENSA-001_openapi_V3.yaml` (schemas `PayloadEnriquecido`/`EventoGuias`) — eso es el contrato, y está definido. Lo que marca `desconocido` en la columna "Fuente / Cómo obtenerlo" es si el sistema origen realmente captura ese dato y de dónde sale — una confirmación de negocio pendiente con el equipo dueño del origen, independiente de que el campo ya tenga nombre en la API.
 
 **Convención en "Fuente / Cómo obtenerlo":**
 - `origen` — el campo viene directamente del sistema origen, sin consultas adicionales.
@@ -746,7 +778,7 @@ Esto es lo que el `mapper` de `unogroup-app` debe producir a partir del `payload
 
 # 5. Especificación OpenAPI
 
-La especificación completa vive en su propio archivo para poder validarla, versionarla y referenciarla directamente (linters, codegen, Swagger UI) sin pasar por Markdown: `HUENSA-001_openapi_V2.yaml`.
+La especificación completa vive en su propio archivo para poder validarla, versionarla y referenciarla directamente (linters, codegen, Swagger UI) sin pasar por Markdown: `HUENSA-001_openapi_V3.yaml`.
 
 **Cobertura actual — ya alineada con la arquitectura de dos microservicios (§2):**
 - `POST /internal/eventos` (tag `ingesta`) — receptor único de eventos de origen (WMS, Guías Manuales, Tracking), con el envelope de Pub/Sub push y los atributos de ruteo (§2.5).
@@ -879,4 +911,4 @@ Este manejo ocurre de forma síncrona dentro del microservicio de UnoGroup (§2.
 6. Diseñar el contrato exacto de los dos endpoints internos: la notificación (Orquestador → UnoGroup) y el callback (UnoGroup → Orquestador), incluyendo autenticación entre servicios dentro del clúster.
 7. Definir el intervalo exacto del job de reconciliación (orden de 15-30 min, sin cerrar todavía un valor final).
 
-*(Preguntas abiertas detalladas, por equipo responsable, con su historial de resolución: ver `HUENSA-001_Bitacora_Decisiones_Modulo_Integracion_Ensamble.md`, Índice Maestro de Preguntas Abiertas.)*
+*(Preguntas abiertas detalladas, por equipo responsable, con su historial de resolución: ver `HUENSA-001_Diseno_Bitacora_Decisiones_Modulo_Integracion_Ensamble.md`, Índice Maestro de Preguntas Abiertas.)*

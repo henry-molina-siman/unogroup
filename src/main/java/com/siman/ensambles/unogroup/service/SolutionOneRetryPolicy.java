@@ -1,15 +1,13 @@
 package com.siman.ensambles.unogroup.service;
 
+import com.siman.ensambles.unogroup.client.CapturingFeignClient;
 import com.siman.ensambles.unogroup.client.SolutionOneClient;
 import com.siman.ensambles.unogroup.client.SolutionOneTokenManager;
 import com.siman.ensambles.unogroup.config.SolutionOneProperties;
-import feign.FeignException;
 import feign.Response;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -21,6 +19,13 @@ import java.util.List;
  * máx 5 intentos), luego escala. Corre en el mismo hilo que invoca
  * (virtual thread, ver VirtualThreadConfig) — sin scheduler, sin tabla
  * de polling.
+ *
+ * <p>Cada llamada real (auth/upload) se registra como una
+ * {@link TransaccionRegistrada} — el detalle HTTP (method/url/headers/body,
+ * ya enmascarado) lo captura {@link CapturingFeignClient}; esta clase solo
+ * anexa la metadata de negocio (secuencia/proposito/esReintento), sin
+ * necesidad de workaround alguno de {@code url}/{@code metodoHttp}
+ * (v3, ver Guía de Transacciones HTTP §4.4 — el workaround de v2 se elimina).
  */
 @Component
 @Slf4j
@@ -29,23 +34,26 @@ public class SolutionOneRetryPolicy {
     private final SolutionOneClient client;
     private final SolutionOneTokenManager tokenManager;
     private final SolutionOneProperties properties;
+    private final CapturingFeignClient capturingFeignClient;
 
     public SolutionOneRetryPolicy(SolutionOneClient client, SolutionOneTokenManager tokenManager,
-            SolutionOneProperties properties) {
+            SolutionOneProperties properties, CapturingFeignClient capturingFeignClient) {
         this.client = client;
         this.tokenManager = tokenManager;
         this.properties = properties;
+        this.capturingFeignClient = capturingFeignClient;
     }
 
     public ResultadoProcesamiento subir(byte[] contenido, String path, String tipoPeticion) {
-        List<IntentoRegistrado> intentos = new ArrayList<>();
+        List<TransaccionRegistrada> transacciones = new ArrayList<>();
+        int secuencia = 1;
 
         String token;
         try {
-            token = obtenerTokenYRegistrar(intentos, false);
+            token = obtenerTokenYRegistrar(transacciones, secuencia++, false);
         } catch (Exception ex) {
             log.error("No se pudo obtener el token de Solution One antes de subir path={}: {}", path, ex.getMessage());
-            return new ResultadoProcesamiento(false, intentos);
+            return new ResultadoProcesamiento(false, transacciones);
         }
 
         boolean reintentoPor401Usado = false;
@@ -54,21 +62,22 @@ public class SolutionOneRetryPolicy {
         int maxIntentos = properties.getReintentos().getMaxIntentos();
 
         while (true) {
-            IntentoRegistrado intento = ejecutarUpload(token, path, contenido, tipoPeticion, numeroUpload, numeroUpload > 1);
-            intentos.add(intento);
-            Integer codigo = intento.getCodigoHttp();
+            TransaccionRegistrada transaccion = ejecutarUploadYRegistrar(token, path, contenido, tipoPeticion,
+                    secuencia++, numeroUpload > 1);
+            transacciones.add(transaccion);
+            Integer codigo = transaccion.getResponse() != null ? transaccion.getResponse().getStatusCode() : null;
 
             if (codigo != null && codigo == 201) {
-                return new ResultadoProcesamiento(true, intentos);
+                return new ResultadoProcesamiento(true, transacciones);
             }
 
             if (codigo != null && codigo == 401 && !reintentoPor401Usado) {
                 reintentoPor401Usado = true;
                 try {
-                    token = obtenerTokenYRegistrar(intentos, true);
+                    token = obtenerTokenYRegistrar(transacciones, secuencia++, true);
                 } catch (Exception ex) {
                     log.error("No se pudo renovar el token de Solution One tras 401 (path={}): {}", path, ex.getMessage());
-                    return new ResultadoProcesamiento(false, intentos);
+                    return new ResultadoProcesamiento(false, transacciones);
                 }
                 numeroUpload++;
                 continue;
@@ -77,13 +86,13 @@ public class SolutionOneRetryPolicy {
             if (codigo != null && (codigo == 400 || codigo == 403 || codigo == 413)) {
                 log.error("Solution One respondió {} para path={} — no se reintenta, se escala (LifeOne/UnoGroup, ver Diseño C6)",
                         codigo, path);
-                return new ResultadoProcesamiento(false, intentos);
+                return new ResultadoProcesamiento(false, transacciones);
             }
 
-            // 500 (o falla de red/timeout, codigo == null) — backoff exponencial.
+            // 500 (o falla de red/timeout, sin response) — backoff exponencial.
             if (numeroUpload >= maxIntentos) {
                 log.error("Se agotaron los {} intentos hacia Solution One para path={}", maxIntentos, path);
-                return new ResultadoProcesamiento(false, intentos);
+                return new ResultadoProcesamiento(false, transacciones);
             }
             dormir(backoffMs);
             backoffMs *= properties.getReintentos().getBackoffMultiplicador();
@@ -91,101 +100,37 @@ public class SolutionOneRetryPolicy {
         }
     }
 
-    private String obtenerTokenYRegistrar(List<IntentoRegistrado> intentos, boolean esReintento) {
-        long inicio = System.currentTimeMillis();
-        String url = tokenUrl();
+    private String obtenerTokenYRegistrar(List<TransaccionRegistrada> transacciones, int secuencia, boolean esReintento) {
         try {
-            String token = tokenManager.renovarToken();
-            intentos.add(IntentoRegistrado.builder()
-                    .numero(esReintento ? 2 : 1)
-                    .tipoPeticion("AUTH_TOKEN")
-                    .url(url)
-                    .metodoHttp("GET")
-                    .codigoHttp(200)
-                    .duracionMs((int) (System.currentTimeMillis() - inicio))
-                    .esReintento(esReintento)
-                    .exitoso(true)
-                    .build());
-            return token;
-        } catch (FeignException fe) {
-            intentos.add(IntentoRegistrado.builder()
-                    .numero(esReintento ? 2 : 1)
-                    .tipoPeticion("AUTH_TOKEN")
-                    .url(url)
-                    .metodoHttp("GET")
-                    .codigoHttp(fe.status())
-                    .duracionMs((int) (System.currentTimeMillis() - inicio))
-                    .esReintento(esReintento)
-                    .exitoso(false)
-                    .errorMensaje(fe.getMessage())
-                    .build());
-            throw fe;
-        } catch (RuntimeException ex) {
-            intentos.add(IntentoRegistrado.builder()
-                    .numero(esReintento ? 2 : 1)
-                    .tipoPeticion("AUTH_TOKEN")
-                    .url(url)
-                    .metodoHttp("GET")
-                    .codigoHttp(null)
-                    .duracionMs((int) (System.currentTimeMillis() - inicio))
-                    .esReintento(esReintento)
-                    .exitoso(false)
-                    .errorMensaje(ex.getMessage())
-                    .build());
-            throw ex;
+            return tokenManager.renovarToken();
+        } finally {
+            transacciones.add(construirTransaccion(secuencia, "AUTH_TOKEN", esReintento));
         }
     }
 
-    private IntentoRegistrado ejecutarUpload(String token, String path, byte[] contenido, String tipoPeticion,
-            int numero, boolean esReintento) {
-        long inicio = System.currentTimeMillis();
-        String url = uploadUrl();
-        try (Response response = client.subirArchivo("Bearer " + token, path,
-                properties.isMkdirParents(), contenido)) {
-            int status = response.status();
-            return IntentoRegistrado.builder()
-                    .numero(numero)
-                    .tipoPeticion(tipoPeticion)
-                    .url(url)
-                    .metodoHttp("POST")
-                    .codigoHttp(status)
-                    .duracionMs((int) (System.currentTimeMillis() - inicio))
-                    .esReintento(esReintento)
-                    .exitoso(status == 201)
-                    .errorMensaje(status == 201 ? null : leerCuerpoError(response))
-                    .build();
+    private TransaccionRegistrada ejecutarUploadYRegistrar(String token, String path, byte[] contenido,
+            String tipoPeticion, int secuencia, boolean esReintento) {
+        try (Response response = client.subirArchivo("Bearer " + token, path, properties.isMkdirParents(), contenido)) {
+            // El body ya fue leído/reconstruido dentro de CapturingFeignClient;
+            // aquí solo cerramos el recurso.
         } catch (Exception ex) {
-            return IntentoRegistrado.builder()
-                    .numero(numero)
-                    .tipoPeticion(tipoPeticion)
-                    .url(url)
-                    .metodoHttp("POST")
-                    .codigoHttp(null)
-                    .duracionMs((int) (System.currentTimeMillis() - inicio))
-                    .esReintento(esReintento)
-                    .exitoso(false)
-                    .errorMensaje(ex.getMessage())
-                    .build();
+            // Falla de red (timeout, conexión rechazada, DNS) — ya quedó
+            // clasificada en CapturingFeignClient; se ignora aquí a propósito.
         }
+        return construirTransaccion(secuencia, tipoPeticion, esReintento);
     }
 
-    private String tokenUrl() {
-        return properties.getBaseUrl() + properties.getTokenPath();
-    }
-
-    private String uploadUrl() {
-        return properties.getBaseUrl() + properties.getUploadPath();
-    }
-
-    private String leerCuerpoError(Response response) {
-        if (response.body() == null) {
-            return null;
-        }
-        try {
-            return new String(response.body().asInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException ex) {
-            return null;
-        }
+    private TransaccionRegistrada construirTransaccion(int secuencia, String proposito, boolean esReintento) {
+        return TransaccionRegistrada.builder()
+                .metadata(TransaccionMetadata.builder()
+                        .secuencia(secuencia)
+                        .proposito(proposito)
+                        .esReintento(esReintento)
+                        .build())
+                .request(capturingFeignClient.tomarUltimaRequest())
+                .response(capturingFeignClient.tomarUltimaResponse())
+                .error(capturingFeignClient.tomarUltimoError())
+                .build();
     }
 
     private void dormir(long millis) {

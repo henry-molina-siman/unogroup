@@ -10,7 +10,7 @@
 ## Índice
 
 1. [Historial de revisiones](#1-historial-de-revisiones)
-2. [Hallazgos de auditoría de código](#2-hallazgos-de-auditoría-de-código)
+2. [Reconciliaciones de documentos divergentes](#2-reconciliaciones-de-documentos-divergentes)
 3. [Historial de hallazgos sobre el contrato de Solution One](#3-historial-de-hallazgos-sobre-el-contrato-de-solution-one)
 4. [Índice Maestro de Preguntas Abiertas](#4-índice-maestro-de-preguntas-abiertas)
 
@@ -26,29 +26,32 @@
 | v2.1 + reconciliación 2026-07-29 | Orquestador y UnoGroup habían quedado con copias separadas del documento de diseño tras dividirse en dos proyectos Maven, y cada equipo solo había actualizado su propia parte. Se fusionan ambas líneas de cambio en un solo documento — ver §2 de esta bitácora para el detalle de qué aportó cada lado. |
 | v3 (esta reorganización) | El documento de diseño se separa en dos: **Diseño/Requerimientos** (el estado actual acordado, sin anotaciones de proceso) y esta **Bitácora** (historial, auditorías, preguntas abiertas). No cambia ningún contenido técnico — es una reorganización editorial. |
 | v3.1 | **Corrección contra el diagrama de infraestructura actualizado:** `WMS-Order Provider` no existe como componente separado — es **DMS/OMS** quien solicita crear la orden en WMS y, por separado, publica el evento de creación al tópico único de Pub/Sub. Corrige el diagrama de arquitectura, la tabla de componentes y las descripciones de UC1/UC2 en el documento de Diseño (§2.1, §2.5, §3.1, §3.2). No cambia el comportamiento del sistema — solo el nombre correcto del componente publicador. |
+| v3.2 — contrato `transacciones[]` (2026-07-29) | **Cambio de ruptura en el contrato del callback.** `ResultadoSolicitud.intentos[]` (campos HTTP sueltos, acoplados a Solution One) se reemplaza por `transacciones[]` (`TransaccionHttp`: `metadata`+`request`+`response`/`error`, genérico, no acoplado a ningún partner) — contrato `HUENSA-001_openapi_V3.yaml` (promovido desde `docs/bitacora/`, reemplaza `openapi_V2.yaml`). `ensamble_bitacora_partner` se recreó por completo (no retrocompatible); `ensamble_solicitud` pierde `payload_partner`/`nombre_archivo` (redundantes frente a la nueva bitácora). Resuelve F8 del lado del contrato (`request.method`/`request.url` obligatorios); la autenticación entre servicios sigue abierta. |
+| v3.2 + reconciliación 2026-07-30 | Segunda vez que Orquestador y UnoGroup quedan con copias separadas tras la migración v3: la copia de `orquestador-app` de esta bitácora registró la migración, mientras la de `unogroup-app` no registró ningún avance, aunque su copia de Diseño/Requerimientos sí incorporó el nuevo modelo `transacciones[]` (con explicaciones y ejemplos adicionales que no estaban del lado de Orquestador). Se fusionan ambas copias — ver §2.2 de esta bitácora para el detalle de qué aportó cada lado y qué gaps quedaron expuestos por la reconciliación. |
 
 ---
 
-# 2. Hallazgos de auditoría de código
+# 2. Reconciliaciones de documentos divergentes
 
-Estos son los hallazgos que surgieron de comparar el diseño acordado contra el código real de `orquestador-app` y `unogroup-app`, durante la reconciliación del 2026-07-29 (ver fila correspondiente en §1).
+Esta sección registra los momentos en que las copias de `orquestador-app` y `unogroup-app` de los documentos de Diseño se separaron y volvieron a fusionarse — no hallazgos de código (esos viven en `HUENSA-001_Implementacion_Bitacora_Decisiones_Modulo_Integracion_Ensamble.md`).
 
-## 2.1 Del lado Orquestador
+## 2.1 Reconciliación 2026-07-29 — primer fork por proyectos Maven
 
-**Discrepancia de `NOT NULL` en `ensamble_bitacora_partner` (afecta Diseño §2.4, §2.6.1):**
-`ensamble_bitacora_partner.url` y `.metodo_http` son `NOT NULL` en el DDL (Implementación §2), pero ni el JSON de ejemplo del callback ni el `IntentoDto` real del código llevan una URL o un método HTTP por intento — el callback nunca los provee. La implementación actual lo resuelve con un workaround no documentado hasta ahora: hardcodea `url = "N/D"` y deriva `metodo_http` de `tipo_peticion` (`AUTH_TOKEN` → `GET`, cualquier otro → `POST`).
-**Pendiente real:** decidir si se agregan `url`/`metodoHttp` al contrato del callback (rompe el principio de "UnoGroup solo reporta lo mínimo") o se relaja el `NOT NULL` en el DDL. Ver también F8 en §4.
+Orquestador y UnoGroup quedaron con copias separadas del documento de diseño tras dividirse en dos proyectos Maven, y cada equipo solo había actualizado su propia parte. Se fusionaron ambas líneas de cambio en un solo documento (ver fila correspondiente en §1).
 
-**Job de reconciliación no implementado (afecta Diseño §2.11):**
-Lo documentado en Diseño §2.11 es el diseño acordado del job, pero no existe ningún paquete `reconciliation` (ni equivalente) en `orquestador-app`, y `application.yml` no tiene configuración para él. El código deja constancia explícita del hueco en varios comentarios ("sin el job de reconciliación — fuera de alcance de esta implementación"). Ver Implementación §1.4.5.
+## 2.2 Reconciliación 2026-07-30 — segundo fork tras la migración a `transacciones[]`
 
-**Bug de ruteo — F17 reabierto en parte (afecta Diseño §2.5, §4.2.1):**
-Los valores de `tipo_evento` para Guías Manuales (`creacion`/`actualizacion`) están definidos y documentados, pero el ruteo real de `actualizacion` para `origen=guias` todavía no está implementado en `orquestador-app` — `EventoRouter.rutearGuias` siempre procesa como creación (ver Implementación §1.4.1).
+Tras la migración al contrato v3 (fila v3.2 de §1), las copias de `orquestador-app` y `unogroup-app` de **ambos** documentos (Diseño/Requerimientos y esta Bitácora) volvieron a divergir.
 
-## 2.2 Del lado UnoGroup
+**Del lado Orquestador:** el registro de la decisión de diseño quedó documentado solo en esa copia; la copia de UnoGroup no había registrado ningún avance de este lado, y su Bitácora seguía idéntica al estado anterior a la migración.
 
-**JWT sin caché — confirmado contra `SolutionOneTokenManager` (afecta Diseño §2.3, §2.9):**
-La gestión del JWT no usa caché entre solicitudes — cada procesamiento adquiere un token nuevo al inicio, no uno reutilizado hasta su expiración. Esto es coherente con el ejemplo del callback (Diseño §2.4), donde `AUTH_TOKEN` aparece siempre como el primer intento de cada resultado reportado. La frase "renovación automática" que aparecía en versiones previas del documento de diseño se refiere al reintento tras `401` (tabla Diseño §2.9), no a un ciclo de vida cacheado con refresco proactivo antes de expirar. El documento de Diseño ya refleja este comportamiento como estado actual, sin la narrativa de auditoría.
+**Del lado UnoGroup:** su copia de Diseño/Requerimientos sí incorporó el modelo `transacciones[]`, con contenido adicional que se fusiona en esta reconciliación — la aclaración de qué campos se enmascaran (`url`/`headers` sí, `body` todavía no), un ejemplo de consulta para reconstruir "el último payload/archivo" sin la columna eliminada, y la justificación de por qué `orden_id`/`sku` dejan de ser nullable en `ensamble_bitacora_partner` (ver Diseño §2.4, §2.6.1).
+
+**Inconsistencia interna detectada y corregida:** la copia de UnoGroup de Diseño/Requerimientos ya describía el modelo v3 en el cuerpo del documento, pero la referencia al archivo de contrato en §5 seguía apuntando a `HUENSA-001_openapi_V2.yaml` en vez de `HUENSA-001_openapi_V3.yaml` — un desfase entre el texto y la referencia de archivo dentro de la misma copia, no una discrepancia real entre equipos. Se corrigió a `V3` en el documento fusionado, consistente con el resto del contenido y con la fila v3.2 de §1.
+
+**Gap de artefacto, resuelto 2026-07-30:** ninguna de las dos copias traía el archivo `HUENSA-001_openapi_V3.yaml` como artefacto real — el repositorio del proyecto solo tenía `HUENSA-001_openapi_V2.yaml`, aunque la fila v3.2 de §1 y varias referencias en Diseño §2.4/§2.6/§5 daban por hecho que V3 ya estaba "promovido". El archivo fue agregado al proyecto el mismo día — ver F21 (§4.6), cerrado.
+
+**Corrección de higiene documental:** el documento de Diseño/Requerimientos (§2.4) traía una anotación sobre qué faltaba construir en un repositorio, que no le correspondía — ese documento describe el estado actual acordado *sin anotaciones de proceso*. Se retiró en la fusión. **La misma regla aplica a esta Bitácora de Diseño:** el estado de qué está o no construido en `orquestador-app`/`unogroup-app` es tema de `HUENSA-001_Implementacion_Bitacora_Decisiones_Modulo_Integracion_Ensamble.md`, no de esta bitácora — se retiraron de aquí todos los hallazgos de auditoría de código (nombres de clase, scripts SQL, workarounds), que ya viven, con más detalle, en esa bitácora. Esta bitácora se limita a las preguntas y decisiones de diseño en sí (por ejemplo, F8 sigue abierta como pregunta de diseño — qué mecanismo de autenticación se usa entre los dos servicios — no como pendiente de código).
 
 ---
 
@@ -80,7 +83,7 @@ Historial de esta pregunta, en orden cronológico:
 2. **"Resuelto" en una sesión previa:** una petición real exitosa había usado la carpeta raíz `assembly` (no `asm`, no `/siman/create|update/`): `assembly/{fecha}/{accion}_{timestamp}_{external_reference}_{sku}.json`.
 3. **Reabierto 2026-07-15:** en producción, con las mismas credenciales (`siman.assembly`) que la petición exitosa anterior, la misma estructura `assembly/{fecha}/...` empezó a responder `403`/`permission denied` (`"Unable to write file \"/assembly/{fecha}/...\""`). Se confirmó que la sección 10 del instructivo tenía razón después de todo: la raíz real es `/siman/create/` para creación y `/siman/update/` para actualización — la opción que se había descartado por error en la sesión previa.
 
-**Estado vigente (reflejado en Diseño §2.9):** `siman/{accion}/{fecha}/{accion}_{timestamp}_{external_reference}_{sku}.json`, implementado en `SolutionOneFileNaming`.
+**Estado vigente (reflejado en Diseño §2.9):** `siman/{accion}/{fecha}/{accion}_{timestamp}_{external_reference}_{sku}.json`.
 
 **Sigue pendiente:** entender por qué la petición de prueba anterior tuvo éxito contra `assembly/` — hipótesis: ambiente/permiso temporal distinto al de producción, sin confirmar con UnoGroup (ver C3 en §4).
 
@@ -163,7 +166,7 @@ Ya consolidadas en **Diseño §7** — proceso manual para cancelaciones, riesgo
 | F5 | `tracking_status: retornada` — ¿se documenta explícitamente como "no usado en Fase 1"? | Diseño §6.5, §7.1 |
 | ~~F6~~ | ~~¿Cómo se distingue `origen`/`flujo` dentro del tópico único de Pub/Sub?~~ — **Resuelto**: atributos de mensaje `origen` y `flujo` únicamente (se descartaron `país`, `bodega`, `estado` — ver Diseño §2.5) | Diseño §2.5 |
 | F7 | Intervalo exacto del job de reconciliación (orden de 15-30 min, valor final sin cerrar) | Diseño §2.11, §8.2 |
-| F8 | Contrato exacto de los dos endpoints internos — notificación (Orquestador→UnoGroup) y callback (UnoGroup→Orquestador) — autenticación entre servicios dentro del clúster (¿mTLS interno, token compartido, nada por estar en red privada?), formato exacto de ambos payloads. Incluye si se agregan `url`/`metodoHttp` al callback (ver §2.1 de esta bitácora). | Diseño §2.4 |
+| F8 | Contrato exacto de los dos endpoints internos — notificación (Orquestador→UnoGroup) y callback (UnoGroup→Orquestador) — autenticación entre servicios dentro del clúster (¿mTLS interno, token compartido, nada por estar en red privada?), formato exacto de ambos payloads. **Formato del callback resuelto 2026-07-29 vía contrato v3:** `ResultadoSolicitud.transacciones[]` reemplaza `intentos[]` — `request.method`/`request.url` son obligatorios en el contrato. **Sigue sin resolver:** qué mecanismo de autenticación se usa entre los dos servicios dentro del clúster. | Diseño §2.4 |
 | ~~F9~~ | ~~Validar contra ambiente de prueba real si el body binario de la carga a Solution One requiere encoder Feign personalizado~~ — **Resuelto**: sí requiere encoder custom (Feign no serializa binario por defecto); probado contra el ambiente de prueba real, `Content-Type: application/json` funciona para el body binario | Diseño §2.9, §8.2 |
 | ~~F11~~ | ~~¿`DMS/OMS` conoce el flujo (ASSE/ENSA) en el momento de crear la orden, para poder setear el atributo `flujo` al publicar?~~ — **Resuelto: no lo conoce, y estructuralmente no puede.** El flujo se determina por línea, dentro de `orderdetails[].ext_udf_str10`, solo después de que el Orquestador consulta el shipment — una misma orden puede tener líneas ASSE y ENSA a la vez. `flujo` deja de ser `required` para `origen=wms` (ver Diseño §2.5). | Diseño §3.1, §3.2, §4.1 |
 | ~~F12~~ | ~~El payload de WMS no indica si un evento de actualización es `UP05` o `UP06`~~ — **Resuelto**: nuevo atributo de mensaje `tipo_evento`, con los códigos nativos del origen (`CREAR`, `UP05`, `UP06` para WMS) — ver Diseño §2.5 | Diseño §3.1, §3.2 |
@@ -171,7 +174,8 @@ Ya consolidadas en **Diseño §7** — proceso manual para cancelaciones, riesgo
 | F14 | ¿Se necesita Cloud Router/Cloud NAT para que el pod del microservicio de UnoGroup tenga salida a internet hacia Solution One (`data.solution1.us`)? Marcado como duda explícita en el propio diagrama de infraestructura del equipo. | Diseño §2.1 |
 | F15 | Confirmar que `DMS/OMS` y `Infor WMS` comparten el mismo `ordenId`/`externOrderKey` entre la creación y las actualizaciones posteriores (UP05/UP06) — no verificado explícitamente, solo asumido por consistencia de diseño. | Diseño §2.1, §3.1, §3.2 |
 | F16 | Cómo detecta el job de reconciliación la tercera zona atascada (UnoGroup procesó pero el callback se perdió) — UnoGroup ya no tiene base de datos propia donde dejar rastro de qué procesó, ¿logging estructurado + alerta externa, o algún otro mecanismo? | Diseño §2.11 |
-| F17 | ¿Qué valores lleva `tipo_evento` para los eventos de Guías Manuales (CARM/TARM/DARM)? — **Valores resueltos**: `creacion` / `actualizacion` (ver Diseño §4.2.1). ⚠ **Reabierto en parte** — el ruteo real de `actualizacion` para `origen=guias` todavía no está implementado en `orquestador-app`, ver §2.1 de esta bitácora. | Diseño §2.5, §4.2.1 |
+| F17 | ¿Qué valores lleva `tipo_evento` para los eventos de Guías Manuales (CARM/TARM/DARM)? — **Resuelto**: `creacion` / `actualizacion` (ver Diseño §4.2.1). El estado de construcción del ruteo real para `actualizacion` se registra en `HUENSA-001_Implementacion_Bitacora_Decisiones_Modulo_Integracion_Ensamble.md`, no aquí. | Diseño §2.5, §4.2.1 |
 | F18 | Valor de `service_type` (`tipoServicio`) para el flujo DARM — solo se confirmó `"armado"` (ASSE/ENSA/CARM/TARM); ¿DARM usa `"desarmado"` u otro valor? | Diseño §4.1, §4.3 |
 | ~~F19~~ | ~~¿El nombre de archivo de actualización usa prefijo `update`?~~ — **Decidido:** sí, por simetría con `create`. Sin ejemplo real que lo confirme todavía — es una decisión de diseño, no una confirmación de UnoGroup. | Diseño §2.9 |
 | ~~F20~~ | ~~¿El nombre de archivo de actualización incluye `sku`?~~ — **Decidido:** sí, siempre se incluye (a diferencia del body, que no lo lleva en actualizaciones — Diseño §4.4). Es lo que le permite a UnoGroup identificar la sub-orden exacta cuando el body no lo indica. | Diseño §2.9 |
+| ~~F21~~ | ~~`HUENSA-001_openapi_V3.yaml` se referencia en Diseño (§2.4, §2.6, §5) y en la fila v3.2 de §1 como el contrato "promovido"/canónico, pero no existía como artefacto en el repositorio del proyecto.~~ — **Resuelto 2026-07-30:** el archivo fue agregado al proyecto. | Diseño §2.4, §2.6, §5 |

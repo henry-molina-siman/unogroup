@@ -37,9 +37,9 @@ public class OrquestadorCallbackSender {
                 boolean esUltimoIntento = intento == maxIntentos;
                 if (esUltimoIntento) {
                     log.error("No se pudo entregar el callback a orquestador-app tras {} intentos — "
-                                    + "ordenId={} sku={} resultadoFinal={} intentos={} — error={}",
+                                    + "ordenId={} sku={} resultadoFinal={} transacciones={} — error={}",
                             maxIntentos, request.getOrdenId(), request.getSku(), request.getResultadoFinal(),
-                            request.getIntentos(), ex.getMessage());
+                            request.getTransacciones(), ex.getMessage());
                     return;
                 }
                 dormir(backoffMs);

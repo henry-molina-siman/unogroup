@@ -63,8 +63,8 @@ class SolutionOneRetryPolicyWireMockTest {
         ResultadoProcesamiento resultado = retryPolicy.subir("{}".getBytes(), "assembly/20260713/x.json", "UPLOAD_CREATE");
 
         assertThat(resultado.exitoso()).isTrue();
-        assertThat(resultado.intentos()).hasSize(2); // AUTH_TOKEN + 1 UPLOAD_CREATE
-        assertThat(resultado.intentos().get(1).getCodigoHttp()).isEqualTo(201);
+        assertThat(resultado.transacciones()).hasSize(2); // AUTH_TOKEN + 1 UPLOAD_CREATE
+        assertThat(resultado.transacciones().get(1).getResponse().getStatusCode()).isEqualTo(201);
         wireMock.verify(1, postRequestedFor(urlPathEqualTo("/api/v2/user/files/upload")));
     }
 

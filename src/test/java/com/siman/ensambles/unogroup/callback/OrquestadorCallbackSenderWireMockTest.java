@@ -10,6 +10,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
+import java.time.Instant;
 import java.util.List;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.*;
@@ -50,8 +51,12 @@ class OrquestadorCallbackSenderWireMockTest {
                 .ordenId("9013059587")
                 .sku("104929691")
                 .resultadoFinal("ENVIADA_PARTNER")
-                .intentos(List.of(IntentoDto.builder().numero(1).tipoPeticion("UPLOAD_CREATE")
-                        .codigoHttp(201).exitoso(true).build()))
+                .transacciones(List.of(TransaccionHttpDto.builder()
+                        .metadata(TransaccionMetadataDto.builder().secuencia(1).proposito("UPLOAD_CREATE").esReintento(false).build())
+                        .request(HttpRequestDto.builder().method("POST").url("https://data.solution1.us/api/v2/user/files/upload")
+                                .timestamp(Instant.now()).build())
+                        .response(HttpResponseDto.builder().statusCode(201).timestamp(Instant.now()).build())
+                        .build()))
                 .build();
     }
 
