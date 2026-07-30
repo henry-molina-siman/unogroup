@@ -83,6 +83,7 @@ public class SolicitudProcesamientoService {
                 .ordenId(request.getOrdenId())
                 .sku(request.getSku())
                 .resultadoFinal(resultadoFinal)
+                .nombreArchivo(path)
                 .intentos(mapearIntentos(resultado.intentos()))
                 .payloadPartner(payloadPartner)
                 .build();
@@ -103,6 +104,8 @@ public class SolicitudProcesamientoService {
                 .map(i -> IntentoDto.builder()
                         .numero(i.getNumero())
                         .tipoPeticion(i.getTipoPeticion())
+                        .url(i.getUrl())
+                        .metodoHttp(i.getMetodoHttp())
                         .codigoHttp(i.getCodigoHttp())
                         .duracionMs(i.getDuracionMs())
                         .esReintento(i.isEsReintento())

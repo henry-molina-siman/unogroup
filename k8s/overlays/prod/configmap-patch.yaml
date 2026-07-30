@@ -1,0 +1,18 @@
+# unogroup-app/k8s/overlays/prod/configmap-patch.yaml
+#
+# Todos los demás valores del ConfigMap se heredan de k8s/base/configmap.yaml
+# sin cambios (LOG_LEVEL_APP=INFO, timeouts y reintentos ya son apropiados
+# para prod). Esta clave queda aislada aquí, aún igual al default de base,
+# como el único punto a tocar una vez que se confirme si producción usa un
+# host de Solution One distinto al ambiente de prueba (Diseño §9.6 —
+# "¿Existe ambiente de pruebas (sandbox) de Solution One... separado de
+# producción?"). Si termina siendo el mismo host, borrar este patch.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unogroup-app-config
+data:
+  # TODO: confirmar con UnoGroup/Tecnología si producción usa un base-url
+  # distinto al de prueba (https://data.solution1.us) antes del primer
+  # despliegue real a prod.
+  SOLUTIONONE_BASE_URL: "https://data.solution1.us"

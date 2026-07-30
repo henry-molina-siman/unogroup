@@ -1,0 +1,20 @@
+# unogroup-app/k8s/overlays/prod/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - path: deployment-patch.yaml
+  - path: serviceaccount-patch.yaml
+  - path: configmap-patch.yaml
+
+images:
+  - name: unogroup-app
+    # TODO: reemplazar por el path real de Artifact Registry, p.ej.:
+    #   us-central1-docker.pkg.dev/PROJECT_ID/ensambles/unogroup-app
+    newName: TBD_REGISTRY/unogroup-app
+    # TODO: en CI, sobreescribir con el SHA/tag del build:
+    #   kustomize edit set image unogroup-app=$REGISTRY/unogroup-app:$TAG
+    newTag: TBD_TAG

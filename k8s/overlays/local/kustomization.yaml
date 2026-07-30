@@ -1,0 +1,16 @@
+# unogroup-app/k8s/overlays/local/kustomization.yaml
+# Para uso contra un clúster local (kind/minikube) con el resto del stack
+# de ensambles corriendo en el mismo namespace.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+patches:
+  - path: deployment-patch.yaml
+  - path: configmap-patch.yaml
+
+images:
+  - name: unogroup-app
+    newTag: local   # build local: `docker build -t unogroup-app:local .`

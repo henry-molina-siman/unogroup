@@ -21,6 +21,7 @@ public class ResultadoSolicitudRequest {
     private String ordenId;
     private String sku;
     private String resultadoFinal;   // EstadoInterno: ENVIADA_PARTNER | ACEPTADA_PARTNER | RECHAZADA_PARTNER
+    private String nombreArchivo;
     private List<IntentoDto> intentos;
     private Object payloadPartner;
 }

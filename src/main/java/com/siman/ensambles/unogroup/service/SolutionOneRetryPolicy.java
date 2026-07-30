@@ -93,11 +93,14 @@ public class SolutionOneRetryPolicy {
 
     private String obtenerTokenYRegistrar(List<IntentoRegistrado> intentos, boolean esReintento) {
         long inicio = System.currentTimeMillis();
+        String url = tokenUrl();
         try {
             String token = tokenManager.renovarToken();
             intentos.add(IntentoRegistrado.builder()
                     .numero(esReintento ? 2 : 1)
                     .tipoPeticion("AUTH_TOKEN")
+                    .url(url)
+                    .metodoHttp("GET")
                     .codigoHttp(200)
                     .duracionMs((int) (System.currentTimeMillis() - inicio))
                     .esReintento(esReintento)
@@ -108,6 +111,8 @@ public class SolutionOneRetryPolicy {
             intentos.add(IntentoRegistrado.builder()
                     .numero(esReintento ? 2 : 1)
                     .tipoPeticion("AUTH_TOKEN")
+                    .url(url)
+                    .metodoHttp("GET")
                     .codigoHttp(fe.status())
                     .duracionMs((int) (System.currentTimeMillis() - inicio))
                     .esReintento(esReintento)
@@ -119,6 +124,8 @@ public class SolutionOneRetryPolicy {
             intentos.add(IntentoRegistrado.builder()
                     .numero(esReintento ? 2 : 1)
                     .tipoPeticion("AUTH_TOKEN")
+                    .url(url)
+                    .metodoHttp("GET")
                     .codigoHttp(null)
                     .duracionMs((int) (System.currentTimeMillis() - inicio))
                     .esReintento(esReintento)
@@ -132,12 +139,15 @@ public class SolutionOneRetryPolicy {
     private IntentoRegistrado ejecutarUpload(String token, String path, byte[] contenido, String tipoPeticion,
             int numero, boolean esReintento) {
         long inicio = System.currentTimeMillis();
+        String url = uploadUrl();
         try (Response response = client.subirArchivo("Bearer " + token, path,
                 properties.isMkdirParents(), contenido)) {
             int status = response.status();
             return IntentoRegistrado.builder()
                     .numero(numero)
                     .tipoPeticion(tipoPeticion)
+                    .url(url)
+                    .metodoHttp("POST")
                     .codigoHttp(status)
                     .duracionMs((int) (System.currentTimeMillis() - inicio))
                     .esReintento(esReintento)
@@ -148,6 +158,8 @@ public class SolutionOneRetryPolicy {
             return IntentoRegistrado.builder()
                     .numero(numero)
                     .tipoPeticion(tipoPeticion)
+                    .url(url)
+                    .metodoHttp("POST")
                     .codigoHttp(null)
                     .duracionMs((int) (System.currentTimeMillis() - inicio))
                     .esReintento(esReintento)
@@ -155,6 +167,14 @@ public class SolutionOneRetryPolicy {
                     .errorMensaje(ex.getMessage())
                     .build();
         }
+    }
+
+    private String tokenUrl() {
+        return properties.getBaseUrl() + properties.getTokenPath();
+    }
+
+    private String uploadUrl() {
+        return properties.getBaseUrl() + properties.getUploadPath();
     }
 
     private String leerCuerpoError(Response response) {

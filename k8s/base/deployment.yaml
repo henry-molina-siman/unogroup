@@ -1,9 +1,8 @@
-# unogroup-app/k8s/deployment.yaml
+# unogroup-app/k8s/base/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: unogroup-app
-  namespace: ensambles
 spec:
   replicas: 2
   selector:
@@ -20,7 +19,8 @@ spec:
                                              # secretos de Solution One.
       containers:
         - name: unogroup-app
-          image: TBD_REGISTRY/unogroup-app:TBD_TAG
+          image: unogroup-app:base   # nombre/tag reales via `images:` en overlays/*
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           envFrom:
@@ -28,6 +28,13 @@ spec:
                 name: unogroup-app-config          # SOLUTIONONE_BASE_URL, ORQUESTADOR_APP_URL, timeouts, etc.
             - secretRef:
                 name: unogroup-app-solutionone-secret  # SOLUTIONONE_USUARIO, SOLUTIONONE_PASSWORD
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: 1
+              memory: 768Mi
           readinessProbe:
             httpGet: { path: /actuator/health/readiness, port: 8080 }
             initialDelaySeconds: 10

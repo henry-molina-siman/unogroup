@@ -1,0 +1,33 @@
+# unogroup-app/k8s/base/configmap.yaml
+# Valores por defecto — reflejan los defaults de src/main/resources/application.yml.
+# Los overlays sobreescriben solo las claves que difieren por ambiente.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unogroup-app-config
+data:
+  SERVER_PORT: "8080"
+
+  SOLUTIONONE_BASE_URL: "https://data.solution1.us"
+  SOLUTIONONE_TOKEN_PATH: "/api/v2/user/token"
+  SOLUTIONONE_UPLOAD_PATH: "/api/v2/user/files/upload"
+  SOLUTIONONE_RUTA_BASE: "siman"
+  SOLUTIONONE_MKDIR_PARENTS: "true"
+  SOLUTIONONE_MAX_INTENTOS: "5"
+  SOLUTIONONE_BACKOFF_MS: "1000"
+  SOLUTIONONE_TIMEOUT_CONN_MS: "3000"
+  SOLUTIONONE_TIMEOUT_READ_MS: "5000"
+  SOLUTIONONE_FEIGN_LOG_LEVEL: "basic"
+
+  DARM_SERVICE_TYPE: "armado"   # ⚠ TBD F18 — ver Diseño §9.6
+
+  NOTIFICACION_AUTH_HABILITADA: "false"   # ⚠ TBD F8 — ver Diseño §9.6
+
+  ORQUESTADOR_APP_URL: "http://svc-orquestador.ensambles.svc.cluster.local"
+  CALLBACK_TIMEOUT_CONN_MS: "2000"
+  CALLBACK_TIMEOUT_READ_MS: "3000"
+  CALLBACK_FEIGN_LOG_LEVEL: "basic"
+  CALLBACK_MAX_INTENTOS: "5"
+  CALLBACK_BACKOFF_MS: "500"
+
+  LOG_LEVEL_APP: "INFO"

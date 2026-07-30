@@ -1,0 +1,19 @@
+# unogroup-app/k8s/overlays/local/deployment-patch.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unogroup-app
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: unogroup-app
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

@@ -1,0 +1,9 @@
+# unogroup-app/k8s/overlays/local/configmap-patch.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unogroup-app-config
+data:
+  LOG_LEVEL_APP: "DEBUG"
+  SOLUTIONONE_FEIGN_LOG_LEVEL: "full"
+  CALLBACK_FEIGN_LOG_LEVEL: "full"

@@ -1,0 +1,18 @@
+# unogroup-app/k8s/base/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ensambles
+
+resources:
+  - serviceaccount.yaml
+  - configmap.yaml
+  - secret.yaml
+  - deployment.yaml
+  - service.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: unogroup-app
+      app.kubernetes.io/part-of: ensambles
+    includeSelectors: false

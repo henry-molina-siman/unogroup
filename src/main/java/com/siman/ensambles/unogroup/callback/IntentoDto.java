@@ -9,6 +9,8 @@ import lombok.Getter;
 public class IntentoDto {
     private int numero;
     private String tipoPeticion;
+    private String url;
+    private String metodoHttp;
     private Integer codigoHttp;
     private Integer duracionMs;
     private boolean esReintento;

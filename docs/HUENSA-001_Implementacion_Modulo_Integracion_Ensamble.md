@@ -2,15 +2,15 @@
 # Implementación — Sistema de Ensambles (Orquestador + UnoGroup)
 
 **Proyecto:** HUENSA-001 — Integración de Pedidos que Requieren Ensamble
-**Documento:** Detalle técnico de implementación de la aplicación: estructura de repositorios, estructura de paquetes, DDL, entidades JPA, configuración Spring Boot, contrato OpenAPI. **La infraestructura (Terraform, GKE, Cloud SQL, Pub/Sub, Secret Manager) se documenta por separado** — ver nota en §7.
-**Documento complementario:** `HUENSA-001_Diseno_Modulo_Integracion_Ensamble_v2.md` — principios, arquitectura de los dos microservicios, casos de uso, mapeo de campos y contrato OpenAPI. Léelo primero si buscas el *por qué* de una decisión; este documento es el *cómo*.
+**Documento:** Detalle técnico de implementación de la aplicación: estructura de repositorios, estructura de paquetes, DDL, entidades JPA, configuración Spring Boot, contrato OpenAPI. Describe el **estado actual del código**, tal como está construido hoy. **La infraestructura (Terraform, GKE, Cloud SQL, Pub/Sub, Secret Manager) se documenta por separado** — ver nota en §7.
+**Documento complementario:** `HUENSA-001_Diseno_Requerimientos_Modulo_Integracion_Ensamble.md` — principios, arquitectura de los dos microservicios, casos de uso, mapeo de campos y contrato OpenAPI. Léelo primero si buscas el *por qué* de una decisión; este documento es el *cómo*.
 **Stack:** Java 21 · Spring Boot 4.x · MySQL 8.0+ (Cloud SQL, instancia ya existente) · GKE (clúster ya existente) · GCP Pub/Sub · OpenFeign · Lombok · Bean Validation · SLF4J
 
-**Estado de este documento:** en construcción, sección por sección, en la misma sesión donde se decidieron los puntos que refleja. Las secciones marcadas ⚠ **TBD** son piezas que ya sabemos que faltan pero todavía no se han cerrado en detalle.
+> **Historial de cambios, hallazgos de auditoría de código y trabajo técnico pendiente:** ver `HUENSA-001_Bitacora_Decisiones_Implementacion_Modulo_Integracion_Ensamble.md`. Este documento solo describe el estado actual del código; no lleva changelog ni anotaciones de sesión. Las secciones marcadas ⚠ **TBD** son piezas que ya sabemos que faltan pero todavía no se han cerrado en detalle — su historial y contexto vive en esa bitácora.
 
-**Actualización de nomenclatura (esta sesión):** la instancia/schema de Cloud SQL donde vive este módulo se comparte con otros sistemas de Siman, no es exclusiva del módulo de ensambles. Las tres tablas (y sus constraints/índices/trigger) adoptan el prefijo `ensamble_` para evitar colisiones de nombre — ver DDL actualizado en §2 y `@Table(name = ...)` en las entidades JPA de §3. No hay cambio de columnas, tipos ni relaciones; ver el documento de Diseño §2.6 para el detalle de la decisión.
+**Nomenclatura de tablas:** la instancia/schema de Cloud SQL donde vive este módulo se comparte con otros sistemas de Siman, no es exclusiva del módulo de ensambles. Las tres tablas (y sus constraints/índices/trigger) adoptan el prefijo `ensamble_` para evitar colisiones de nombre — ver DDL en §2 y `@Table(name = ...)` en las entidades JPA de §3 (ver Diseño §2.6 para el detalle de la decisión).
 
-> **Corrección de reconciliación:** una versión intermedia de este documento había vuelto, sin nota explicativa, a un proyecto Maven multi-módulo (`ensambles-parent` agregando `orquestador-app`/`unogroup-app` como módulos de un mismo reactor). Eso contradecía la decisión ya confirmada de **dos repositorios Git independientes, sin `pom.xml` padre ni módulo común entre ellos** (ver §1.1). Esa decisión de repos separados sigue siendo la vigente — se restaura en esta versión, y la sección de módulos Maven vuelve a reflejarla.
+**Repositorios:** `orquestador-app` y `unogroup-app` viven en dos repositorios Git independientes, sin `pom.xml` padre ni módulo común entre ellos (ver §1.1).
 
 ---
 
@@ -33,7 +33,7 @@
    - 7.2 Kubernetes — `orquestador-app`
    - 7.3 Kubernetes — `unogroup-app`
 8. Infraestructura Terraform — nota de alcance
-9. Pendientes que afectan la implementación
+9. Trabajo pendiente
 
 ---
 
@@ -41,31 +41,37 @@
 
 ## 1.1 Repositorios Git y estructura de proyecto
 
-> **Decisión confirmada, vigente: se elimina el proyecto Maven multi-módulo `ensambles-parent`.** `orquestador-app` y `unogroup-app` no viven como módulos de un mismo reactor Maven en un solo repositorio — son **dos proyectos independientes, cada uno con su propio repositorio Git**. No hay un `pom.xml` padre agregador, ni un directorio raíz común que los contenga a ambos: cada repositorio contiene un único proyecto Maven `jar`, autocontenido, con su propio historial de commits, versionado (tags/releases) y pipeline de CI/CD.
+**`orquestador-app` y `unogroup-app` son dos proyectos independientes, cada uno con su propio repositorio Git.** No hay un `pom.xml` padre agregador, ni módulo Maven común entre ellos: cada repositorio contiene un único proyecto Maven `jar`, autocontenido, con su propio historial de commits, versionado (tags/releases) y pipeline de CI/CD. Las entidades JPA viven únicamente en `orquestador-app` (el único que las usa, ver §3); los enums de dominio se definen localmente en cada app, con los mismos valores — la consistencia entre ambos la garantiza el contrato OpenAPI (`HUENSA-001_openapi_V2.yaml`, que ya tiene esos valores como `enum:` en sus schemas), no una dependencia de build compartida.
 
-> Esto es una extensión natural de una decisión ya tomada en una sesión anterior: se había eliminado `ensambles-common`, el módulo Maven que compartía entidades JPA y enums de dominio entre los dos microservicios, porque ese motivo (base de datos compartida) ya no existía — nació cuando la base de datos era compartida entre los dos microservicios, y ese motivo desapareció cuando `unogroup-app` dejó de tener acceso a MySQL. Las entidades JPA ahora viven únicamente en `orquestador-app` (el único que las usa). Los 3 enums de dominio ya no se comparten vía un `.jar` común — cada app define los suyos localmente, con los mismos valores; la consistencia entre ambos la garantiza el contrato OpenAPI (`HUENSA-001_openapi_v2.yaml`, que ya tiene esos valores como `enum:` en sus schemas), no una dependencia de build compartida entre dos servicios que se diseñaron para evolucionar por separado. Sin ningún artefacto Java compartido entre ambos, mantenerlos en un solo repositorio multi-módulo dejó de aportar valor: el reactor Maven de un monorepo solo tiene sentido cuando hay módulos que se construyen o versionan juntos, y aquí ya no los había — solo los mantenía juntos la conveniencia de un solo `git clone`. Separar los repositorios hace explícito, también a nivel de control de versiones, lo que ya era cierto a nivel de código: son dos servicios que se diseñaron para evolucionar, versionarse y desplegarse por separado (Diseño §1.1, §2.3).
-
-**Decisión confirmada:** dos repositorios Git independientes, uno por microservicio, cada uno con su propio proyecto Maven `jar` de Spring Boot, sin ningún módulo ni `pom.xml` padre común entre ellos.
+**Repositorio `orquestador-app`** (git remote propio):
 
 ```
-repositorio: orquestador-app                    repositorio: unogroup-app
-(git remote propio)                             (git remote propio)
-
-orquestador-app/                                 unogroup-app/
-├── pom.xml            (standalone, sin parent   ├── pom.xml            (standalone, sin parent
-│                        interno — ver §6.1)      │                        interno — ver §6.2)
-├── src/                                          ├── src/
-├── Dockerfile                                     ├── Dockerfile
-└── k8s/                                           └── k8s/
-    ├── deployment.yaml                                ├── deployment.yaml
-    └── service.yaml                                    └── service.yaml
+orquestador-app/
+├── pom.xml            # standalone, sin parent interno — ver §6.1
+├── src/
+├── Dockerfile
+└── k8s/
+    ├── deployment.yaml
+    └── service.yaml
 ```
 
-**Consecuencias directas de este cambio, que se reflejan en el resto de este documento:**
+**Repositorio `unogroup-app`** (git remote propio):
+
+```
+unogroup-app/
+├── pom.xml            # standalone, sin parent interno — ver §6.2
+├── src/
+├── Dockerfile
+└── k8s/               # Kustomize — estructura completa en §7.3
+    ├── base/
+    └── overlays/
+```
+
+**Dónde se refleja esto en el resto del documento:**
 - **§6 (Dependencias Maven):** no hay `pom.xml` padre. Cada proyecto declara su propio `<parent>` apuntando directamente a `spring-boot-starter-parent`, e importa el BOM de Spring Cloud en su propio `dependencyManagement`. Ver §6.1 y §6.2.
 - **§7.1 (Dockerfile):** el build no copia un `pom.xml` padre ni usa `-pl` (build de un módulo dentro de un reactor) — cada `Dockerfile` vive en la raíz de su propio repositorio y compila un proyecto Maven normal, de un solo módulo.
-- **CI/CD:** cada repositorio tiene su propio pipeline (build, test, imagen de contenedor, tag) e implica versiones independientes de la imagen para `orquestador-app` y `unogroup-app` — ya no hay un único build que produzca ambos artefactos a la vez.
-- **Consistencia de contrato:** la fuente de verdad entre ambos sigue siendo el contrato OpenAPI (`HUENSA-001_openapi_v2.yaml`), nunca una dependencia de build compartida.
+- **CI/CD:** cada repositorio tiene su propio pipeline (build, test, imagen de contenedor, tag) — versiones de imagen independientes para `orquestador-app` y `unogroup-app`.
+- **Consistencia de contrato:** la fuente de verdad entre ambos es el contrato OpenAPI (`HUENSA-001_openapi_V2.yaml`), nunca una dependencia de build compartida.
 
 ## 1.2 Estructura de paquetes — `orquestador-app`
 
@@ -83,31 +89,28 @@ com.siman.ensambles.orquestador
 │                              # retirados — asumían que el evento ya traía los datos de negocio
 ├── controller/               # GET /solicitudes/{ordenId} — trazabilidad (público)
 │                              # POST /internal/orquestador/solicitudes/resultado — recibe
-│                              # el callback de unogroup-app (nuevo, esta sesión — ver §1.4.4b)
+│                              # el callback de unogroup-app (ver §1.4.4b)
 ├── service/                  # idempotencia (ordenId+sku), fan-out de updates sin sku,
-│                              # transición de estado interno hasta ENRIQUECIDA, y ahora
-│                              # también la transición final al recibir el callback
-├── enrichment/                # Paso central y obligatorio para WMS (ya no opcional/"consulta:
-│                              # RMS" — cambio de arquitectura esta sesión): WmsShipmentClient
+│                              # transición de estado interno hasta ENRIQUECIDA, y también
+│                              # la transición final al recibir el callback
+├── enrichment/                # Paso central y obligatorio para WMS: WmsShipmentClient
 │                              # consulta GET /wms/dw/v1/shipment/get-shipment/{whseId}/
 │                              # {externOrderKey} tanto en creación como en actualización;
 │                              # filtra orderdetails[] por ext_udf_str10 no nulo para decidir
 │                              # qué líneas generan sub-orden y con qué flujo (ASSE/ENSA) cada
-│                              # una. Para Guías, sigue resolviendo los campos marcados
+│                              # una. Para Guías, resuelve los campos marcados
 │                              # "consulta: RMS" en el Diseño §4.3 (item_brand/category/description)
 ├── client/                    # @FeignClient hacia unogroup-app — POST /internal/unogroup/solicitudes
-│                              # (ahora con payload_enriquecido completo, no una referencia)
+│                              # con el payload_enriquecido completo (no una referencia)
 ├── domain/                     # entidades JPA (SolicitudEnsamble, SolicitudHistorial,
 │   │                          # BitacoraPartner) y enums de dominio (EstadoInterno,
-│   │                          # TrackingStatus, FlujoEnsamble) — antes en ensambles-common,
-│   │                          # movidas aquí esta sesión al eliminar ese módulo (§1.1):
-│   │                          # `unogroup-app` nunca las usó desde que dejó de tener
-│   │                          # acceso a base de datos, así que ya no había razón para
-│   │                          # compartirlas vía un módulo Maven común.
+│   │                          # TrackingStatus, FlujoEnsamble) — único módulo que las usa,
+│   │                          # `unogroup-app` no tiene acceso a base de datos y define
+│   │                          # su propia copia local de los enums (ver §1.1).
 │   └── enums/
 ├── repository/                 # Spring Data JPA sobre las entidades de domain/
 │                              # (findByOrdenIdAndSku, findByOrdenId — fan-out). Único de los
-│                              # dos módulos con acceso a base de datos (esta sesión).
+│                              # dos módulos con acceso a base de datos.
 ├── reconciliation/            # job periódico (ver Diseño §2.11) — filas atascadas en
 │                              # RECIBIDA, ENRIQUECIDA sin notificar, o notificada sin callback
 └── config/
@@ -115,7 +118,7 @@ com.siman.ensambles.orquestador
 
 ## 1.3 Estructura de paquetes — `unogroup-app`
 
-> **Cambio de esta sesión:** desaparece el paquete `repository/` por completo — `unogroup-app` ya no tiene acceso a base de datos (ver Diseño §2.3/§2.4). Aparece `callback/` para reportar el resultado de vuelta al Orquestador. **Y se aplana `adapter/solutionone/`** — con UnoGroup ya sin ninguna otra responsabilidad de negocio (todo su código existe únicamente para hablarle a Solution One), anidar un paquete "adapter" dentro de un microservicio que en sí mismo es el adapter no protege nada; es capa sobre capa sin beneficio. Si mañana se reemplaza UnoGroup, no se cambia un adapter interno — se construye otro microservicio (decisión ya tomada esta sesión).
+`unogroup-app` no tiene paquete `repository/` — no accede a base de datos (ver Diseño §2.3/§2.4). Tiene, en cambio, `callback/` para reportar el resultado de vuelta al Orquestador. La comunicación con Solution One vive directo en `client/`/`dto`/`mapper`, sin anidarla bajo un paquete "adapter": con UnoGroup sin ninguna otra responsabilidad de negocio (todo su código existe únicamente para hablarle a Solution One), UnoGroup **es** el adapter — no lo contiene. Si en el futuro se reemplaza UnoGroup por otro partner, no se cambia un adapter interno: se construye otro microservicio.
 
 ```
 com.siman.ensambles.unogroup
@@ -146,50 +149,49 @@ com.siman.ensambles.unogroup
 
 ### 1.4.1 `orquestador-app` — `messaging`
 
-- Recibe el `POST /internal/eventos` (push de Pub/Sub — ver `HUENSA-001_openapi_v2.yaml`).
+- Recibe el `POST /internal/eventos` (push de Pub/Sub — ver `HUENSA-001_openapi_V2.yaml`).
 - Decodifica `message.data` (base64) y lee `message.attributes.origen`/`tipo_evento` **antes** de deserializar el contenido — evita tener que "adivinar" el schema inspeccionando el JSON.
-- Rutea al mapper correspondiente según `origen`+`tipo_evento`. **Cambio esta sesión:** para `origen=wms`, `flujo` ya no se lee ni se persiste como atributo de transporte — no aplica (confirmado, Diseño §2.5/§9.1 A1/§9.6 F11): ASSE/ENSA se determinan por línea, dentro del `enrichment`, después de consultar el shipment, nunca al momento de publicar. Para `origen=guias`, `flujo` (`CARM`/`TARM`/`DARM`) sigue siendo obligatorio y sí se persiste directo.
-- ✅ **Resuelto (Diseño §9.6 F12/F17):** el ruteo lee directamente `message.attributes.tipo_evento` (`CREAR`/`UP05`/`UP06` para WMS; `creacion`/`actualizacion` para Guías) — no hace falta inferir la transición comparando contra el estado actual de la sub-orden.
-- **`WmsEventoMapper` (cambio de arquitectura esta sesión):** para `origen=wms`, el mapper ya no construye la entidad directamente desde el payload — el payload (`EventoWmsCrear` en creación; `WmsUP05Payload`/`WmsUP06Payload` en actualización) es solo un disparador. El mapper extrae únicamente `whseId`+`externOrderKey`:
+- Rutea al mapper correspondiente según `origen`+`tipo_evento`. Para `origen=wms`, `flujo` no se lee ni se persiste como atributo de transporte — no aplica (Diseño §2.5): ASSE/ENSA se determinan por línea, dentro del `enrichment`, después de consultar el shipment, nunca al momento de publicar. Para `origen=guias`, `flujo` (`CARM`/`TARM`/`DARM`) sigue siendo obligatorio y sí se persiste directo.
+- El ruteo lee directamente `message.attributes.tipo_evento` (`CREAR`/`UP05`/`UP06` para WMS; `creacion`/`actualizacion` para Guías) — no hace falta inferir la transición comparando contra el estado actual de la sub-orden.
+- ⚠ **Gap conocido — `origen=guias` con `tipo_evento=actualizacion` no está implementado.** `EventoRouter.rutearGuias` ignora el valor de `tipoEvento` y siempre invoca el mapper de creación. Pendiente real: construir el camino de actualización para CARM/TARM/DARM (detalle en la Bitácora de Implementación).
+- **`WmsEventoMapper`:** para `origen=wms`, el mapper no construye la entidad directamente desde el payload — el payload (`EventoWmsCrear` en creación; `WmsUP05Payload`/`WmsUP06Payload` en actualización) es solo un disparador. El mapper extrae únicamente `whseId`+`externOrderKey`:
   - Creación y UP05: un solo `Head`, una sola extracción.
   - UP06: `Head` es un **arreglo de órdenes** — el mapper itera `Head[]` y produce una extracción de `whseId`+`externOrderKey` por cada orden del lote (fan-out de primer nivel). Cada una se procesa de forma independiente en los pasos siguientes.
   - Cada extracción se delega a `enrichment` (§1.4.3), que consulta el shipment y devuelve las líneas calificadas (`ext_udf_str10` no nulo) — de ahí sale el fan-out de segundo nivel (por línea/SKU), tanto para creación (nuevas entidades `RECIBIDA`) como para actualización (aplicado sobre sub-órdenes ya existentes, vía el fan-out del `service` descrito en §1.4.2).
-- **Fan-out de creación para origen `guias` (sin cambios este ciclo):** el evento unificado `EventoGuias` (CARM/TARM/DARM) trae **un solo `ordenId` con `items[]`** — el aplicativo de Guías ya no publica un evento por SKU. `EventoGuiasMapper` itera `items[]` y produce una entidad `SolicitudEnsamble` (`estado_interno = RECIBIDA`) por cada elemento, todas bajo el mismo `ordenId`, antes de pasar cada una al `service` para enriquecimiento y notificación individual. Esto es un fan-out distinto al de WMS: para Guías ocurre en el `mapper`, leyendo directamente `items[]` del propio evento (sin consulta externa); para WMS ocurre en el `enrichment`, después de una consulta HTTP.
+- **Fan-out de creación para origen `guias`:** el evento unificado `EventoGuias` (CARM/TARM/DARM) trae **un solo `ordenId` con `items[]`** — el aplicativo de Guías no publica un evento por SKU. `EventoGuiasMapper` itera `items[]` y produce una entidad `SolicitudEnsamble` (`estado_interno = RECIBIDA`) por cada elemento, todas bajo el mismo `ordenId`, antes de pasar cada una al `service` para enriquecimiento y notificación individual. Esto es un fan-out distinto al de WMS: para Guías ocurre en el `mapper`, leyendo directamente `items[]` del propio evento (sin consulta externa); para WMS ocurre en el `enrichment`, después de una consulta HTTP.
 
 ### 1.4.2 `orquestador-app` — `service`
 
-- **Idempotencia de creación:** constraint única `(orden_id, sku)` en `ensamble_solicitud` — captura `DataIntegrityViolationException` y la traduce a resultado idempotente (no error, no notifica a `unogroup-app`), sin excepción — ver Diseño §2.6. **Corrección (2026-07-15):** este párrafo antes decía que la propia verificación de duplicado determinaba `accion=update`; eso contradecía el §2.6 y nunca estuvo implementado así. El valor real de `accion` viaja explícito en `SolicitudNotificacionRequest.accion` (`create`/`update`, contrato OpenAPI) — `create` desde `crear()` en el primer insert, `update` desde `aplicarActualizacion()` (ver línea siguiente). Con el fan-out de creación de Guías (§1.4.1) y el fan-out por línea de WMS (vía `enrichment`, §1.4.3), esta constraint también protege contra reintentos de entrega de Pub/Sub del mismo evento: cada `(ordenId, sku)` sigue siendo único aunque el evento completo se reprocese.
-- **Fan-out de actualización:** si el evento no trae `sku` (o, para WMS, si el `enrichment` devuelve varias líneas calificadas para el mismo `ordenId`), busca todas las sub-órdenes bajo ese `ordenId` que califiquen y aplica el cambio a cada una — y notifica a `unogroup-app` con `accion=update` por cada sub-orden afectada (antes un gap: `aplicarActualizacion` no notificaba; corregido 2026-07-15). **Confirmado (esta sesión):** no hay despachos parciales, así que no hace falta cruzar contra `detail[]`/`pickDetail[]` del evento crudo — todas las sub-órdenes calificadas de la orden se actualizan juntas. **No confundir con el fan-out de creación de `EventoGuiasMapper` (§1.4.1)** — este actúa sobre sub-órdenes ya persistidas, aquel sobre `items[]` de un evento entrante.
+- **Idempotencia de creación:** constraint única `(orden_id, sku)` en `ensamble_solicitud` — captura `DataIntegrityViolationException` y la traduce a resultado idempotente (no error, no notifica a `unogroup-app`), sin excepción — ver Diseño §2.6. El valor de `accion` viaja explícito en `SolicitudNotificacionRequest.accion` (`create`/`update`, contrato OpenAPI) — `create` desde `crear()` en el primer insert, `update` desde `aplicarActualizacion()` (ver línea siguiente); nunca se infiere de la verificación de duplicado. Con el fan-out de creación de Guías (§1.4.1) y el fan-out por línea de WMS (vía `enrichment`, §1.4.3), esta constraint también protege contra reintentos de entrega de Pub/Sub del mismo evento: cada `(ordenId, sku)` sigue siendo único aunque el evento completo se reprocese.
+- **Fan-out de actualización:** si el evento no trae `sku` (o, para WMS, si el `enrichment` devuelve varias líneas calificadas para el mismo `ordenId`), busca todas las sub-órdenes bajo ese `ordenId` que califiquen, aplica el cambio a cada una y notifica a `unogroup-app` con `accion=update` por cada sub-orden afectada. No hay despachos parciales, así que no hace falta cruzar contra `detail[]`/`pickDetail[]` del evento crudo — todas las sub-órdenes calificadas de la orden se actualizan juntas. **No confundir con el fan-out de creación de `EventoGuiasMapper` (§1.4.1)** — este actúa sobre sub-órdenes ya persistidas, aquel sobre `items[]` de un evento entrante.
 - **Manejo de update huérfano:** si no existe ninguna sub-orden para el `ordenId`, no asume error inmediato — aplica ventana de tolerancia corta (condición de carrera con la creación, que puede no haberse procesado aún).
 - Transiciona `estado_interno`: `RECIBIDA` → (enriquecimiento) → `ENRIQUECIDA`. Al completar el enriquecimiento, escribe el resultado en `payload_enriquecido` (columna separada de `payload_origen`, que se mantiene inmutable como crudo de auditoría — ver §2 y §3). Al llegar a `ENRIQUECIDA`, invoca `client` para notificar al UnoGroup.
 - Registra en `SolicitudHistorial` cada transición de negocio — **no** el detalle de llamadas HTTP (eso vive exclusivamente en `ensamble_bitacora_partner`, poblada por este mismo servicio a partir del callback que reporta `unogroup-app`, ver §1.4.4b).
 
 ### 1.4.3 `orquestador-app` — `enrichment`
 
-- **Cambio de arquitectura esta sesión — paso central y obligatorio para WMS, ya no opcional:** `WmsShipmentClient` consulta `GET /wms/dw/v1/shipment/get-shipment/{whseId}/{externOrderKey}` (`WmsShipmentDetail`, ver openapi) **siempre** que `WmsEventoMapper` (§1.4.1) entrega una extracción — tanto en creación como en actualización, sin excepción. Antes se asumía que el evento crudo ya traía (o casi traía) los datos de negocio, y esta consulta era el fallback para los pocos campos faltantes; ahora es la única fuente real.
-- **Filtrado y determinación de flujo:** de la respuesta, filtra `orderdetails[]` por `ext_udf_str10` no nulo. Cada línea calificada determina su propio `FlujoEnsamble` (`ASSE`→`service_location=casa`, `ENSA`→`service_location=centro_distribucion`, vía la regla derivada en Diseño §4.1) — este es el momento exacto en que se resuelve A1/F11: el flujo nunca llega como atributo de transporte, se calcula aquí, por línea.
+- **Paso central y obligatorio para WMS, no opcional:** `WmsShipmentClient` consulta `GET /wms/dw/v1/shipment/get-shipment/{whseId}/{externOrderKey}` (`WmsShipmentDetail`, ver openapi) **siempre** que `WmsEventoMapper` (§1.4.1) entrega una extracción — tanto en creación como en actualización, sin excepción; es la única fuente real de los datos de negocio.
+- **Filtrado y determinación de flujo:** de la respuesta, filtra `orderdetails[]` por `ext_udf_str10` no nulo. Cada línea calificada determina su propio `FlujoEnsamble` (`ASSE`→`service_location=casa`, `ENSA`→`service_location=centro_distribucion`, vía la regla derivada en Diseño §4.1) — el flujo nunca llega como atributo de transporte, se calcula aquí, por línea.
 - **En creación:** cada línea calificada se convierte en una nueva entidad `SolicitudEnsamble` (`estado_interno = RECIBIDA` → `ENRIQUECIDA` tras completar el mapeo de campos).
 - **En actualización:** las líneas calificadas identifican qué sub-órdenes ya persistidas (por `ordenId`+`sku`) deben transicionar `tracking_status` — delega al fan-out de actualización del `service` (§1.4.2).
 - Para los campos que ni siquiera `WmsShipmentDetail` trae (`item_brand`, `item_category`, `item_description`, `customer_vip`, `latitud`/`longitud` — ver Diseño §4.1/§4.3, A5), este paquete sigue siendo responsable de la consulta a RMS como fallback adicional.
-- Para Guías, sin cambios: resuelve los campos marcados `consulta: RMS` en el Diseño §4.3.
+- Para Guías, resuelve los campos marcados `consulta: RMS` en el Diseño §4.3.
 - Responsabilidad exclusiva de este paquete: **nunca** debe vivir lógica de enriquecimiento dentro de `messaging` ni de `service`, para mantener la responsabilidad de "completar datos" separada de "recibir evento" y de "orquestar transición de estado".
-- ⚠ **Pendientes (nuevo, esta sesión, dejados abiertos a propósito):** fuente exacta de `tracking_order_time` (`adddate` vs. `orderdate` de `WmsShipmentDetail`) y de `tracking_dispatched_time`/`tracking_delivered_time` (campo `fecha` del payload crudo vs. hora de recepción del evento) — ver Diseño §9.1 A6/A7.
+- ⚠ **Pendiente:** fuente exacta de `tracking_order_time` (`adddate` vs. `orderdate` de `WmsShipmentDetail`) y de `tracking_dispatched_time`/`tracking_delivered_time` (campo `fecha` del payload crudo vs. hora de recepción del evento) — ver Bitácora de Diseño, A6/A7.
 
 ### 1.4.4 `orquestador-app` — `client`
 
-- `@FeignClient` hacia `unogroup-app`, endpoint `POST /internal/unogroup/solicitudes` (ver `HUENSA-001_openapi_v2.yaml`).
-- Payload: **el `payload_enriquecido` completo, más el campo `accion` explícito** (`create`/`update`, ver §1.4.2) — no una referencia. UnoGroup ya no tiene dónde ir a buscar el contenido, y no tiene que inferir si es creación o actualización a partir de la forma del payload (ver Diseño §2.4).
+- `@FeignClient` hacia `unogroup-app`, endpoint `POST /internal/unogroup/solicitudes` (ver `HUENSA-001_openapi_V2.yaml`).
+- Payload: **el `payload_enriquecido` completo, más el campo `accion` explícito** (`create`/`update`, ver §1.4.2) — no una referencia. UnoGroup no tiene dónde ir a buscar el contenido, y no tiene que inferir si es creación o actualización a partir de la forma del payload (ver Diseño §2.4).
 - Reintento corto en el momento (2-3 intentos, backoff de segundos) ante fallas transitorias — ver Diseño §2.11. El job de `reconciliation` es la red de seguridad para el caso donde incluso este reintento corto falle del todo.
 - No espera el resultado final en la respuesta — UnoGroup responde `202` de inmediato; el resultado llega después por el callback (§1.4.4b).
 
 ### 1.4.4b `orquestador-app` — `controller` (endpoint de callback)
 
-> **Nuevo, esta sesión** — no existía en la versión anterior de este documento.
-
-- Expone `POST /internal/orquestador/solicitudes/resultado` (nombre tentativo, contrato exacto pendiente — Diseño §9.6 F8), que recibe el callback de `unogroup-app` con el resultado final y el detalle de cada intento (`AUTH_TOKEN` incluido).
+- Expone `POST /internal/orquestador/solicitudes/resultado` (nombre tentativo, contrato exacto pendiente — Bitácora de Diseño, F8), que recibe el callback de `unogroup-app` con el resultado final y el detalle de cada intento (`AUTH_TOKEN` incluido).
 - Delega a `service`, que inserta cada intento como una fila de `ensamble_bitacora_partner` y transiciona `estado_interno` según `resultadoFinal` — este controller es la única vía por la que `ensamble_bitacora_partner` recibe datos (ver §1.4.2 y §2, ownership actualizado).
 
-### 1.4.4c `orquestador-app` — `client/wms` (nuevo, esta sesión)
+### 1.4.4c `orquestador-app` — `client/wms`
 
 - `WmsShipmentClient` — `@FeignClient` hacia la API de WMS, `GET /wms/dw/v1/shipment/get-shipment/{whseId}/{externOrderKey}`. Vive junto a (o dentro de) `enrichment`, no dentro de `client/` — ese paquete es exclusivamente para la comunicación hacia `unogroup-app`, un contrato interno distinto con su propio ciclo de vida.
 - Sin autenticación definida todavía — mismo pendiente estructural que el resto de credenciales externas (ver §7, placeholders `TBD_*`).
@@ -197,36 +199,38 @@ com.siman.ensambles.unogroup
 
 ### 1.4.5 `orquestador-app` — `reconciliation`
 
-- Job periódico (orden de 15-30 min, valor exacto ⚠ TBD — Diseño §9.6 F7) que revisa filas atascadas en **tres** zonas (Diseño §2.11 — se agregó una tercera esta sesión):
+> ⚠ **Estado actual: no implementado.** Esta sección describe el diseño acordado, pero el paquete `reconciliation` **no existe** en `src/main/java` del repositorio actual, ni la clave `ensambles.reconciliation.*` en `application.yml` (a diferencia de lo mostrado en §4 de este documento). Detalle en la Bitácora de Implementación §2.1.
+
+- Job periódico (orden de 15-30 min, valor exacto ⚠ TBD — Bitácora de Diseño, F7) que revisa filas atascadas en **tres** zonas (Diseño §2.11):
   - `RECIBIDA` por más de N minutos sin pasar a `ENRIQUECIDA`.
   - `ENRIQUECIDA` por más de N minutos sin recibir el callback de UnoGroup.
-  - ⚠ **TBD (Diseño §9.6 F16):** cómo distinguir "UnoGroup nunca recibió la notificación" de "UnoGroup sí procesó pero el callback se perdió" — sin acceso de UnoGroup a base de datos, esta distinción no es trivial. Puede requerir que `orquestador-app` registre el intento de notificación (no solo el resultado) para poder diferenciar los dos casos.
+  - ⚠ **TBD (Bitácora de Diseño, F16):** cómo distinguir "UnoGroup nunca recibió la notificación" de "UnoGroup sí procesó pero el callback se perdió" — sin acceso de UnoGroup a base de datos, esta distinción no es trivial. Puede requerir que `orquestador-app` registre el intento de notificación (no solo el resultado) para poder diferenciar los dos casos.
 - Vive en `orquestador-app` porque el Orquestador es quien tiene visibilidad completa del ciclo de vida (crea la fila, notifica, y recibe el callback); UnoGroup no tiene ningún estado persistente propio para consultar.
 
 ### 1.4.6 `unogroup-app` — `controller` / `service`
 
-> **Reescrito esta sesión** — UnoGroup ya no lee de base de datos; procesa lo que recibe en el body y reporta por callback.
+UnoGroup no lee de base de datos — procesa lo que recibe en el body y reporta por callback.
 
 - `controller` recibe la notificación con el `payload_enriquecido` completo y el campo `accion` (`create`/`update`) en el body. Responde `202` de inmediato (siempre antes de procesar — comunicación asíncrona, ver Diseño §2.4) y delega el procesamiento a `service`, que corre después de responder.
-- `service` lee `accion` directamente del body — **nunca infiere** creación vs. actualización a partir de qué campos trae `payloadEnriquecido` (ver Diseño §2.4: sin este campo explícito, esa inferencia sería frágil e implícita, el mismo problema ya resuelto para `tipo_evento`). Traduce el payload recibido (no lee nada de base de datos — no tiene), invoca `client`/`mapper` (antes agrupados bajo `adapter.solutionone` — aplanado esta sesión, ver §1.4), aplica la política de reintentos síncrona de la tabla en Diseño §2.9 (backoff exponencial para 500, una vez para 401, sin reintento para 400/403/413), acumulando en memoria el detalle de cada intento (incluyendo `AUTH_TOKEN`).
+- `service` lee `accion` directamente del body — **nunca infiere** creación vs. actualización a partir de qué campos trae `payloadEnriquecido` (ver Diseño §2.4). Traduce el payload recibido, invoca `client`/`mapper`, aplica la política de reintentos síncrona de la tabla en Diseño §2.9 (backoff exponencial para 500, una vez para 401, sin reintento para 400/403/413), acumulando en memoria el detalle de cada intento (incluyendo `AUTH_TOKEN`).
 - Al terminar (éxito o fallo definitivo), invoca `callback` con el resultado final y la lista completa de intentos — este es el único momento en que UnoGroup "entrega" lo que hizo; no queda ningún registro de la ejecución dentro de `unogroup-app` una vez que el callback se envía.
 
-### 1.4.7 `unogroup-app` — `client` / `dto` / `mapper` (antes `adapter.solutionone`)
+### 1.4.7 `unogroup-app` — `client` / `dto` / `mapper`
 
-**Construcción del `path` (query param) — antes solo descrito como "convención con inconsistencias sin resolver"; algoritmo revisado el 2026-07-15 (Diseño §2.9, §6.4.3):**
+**Construcción del `path` (query param) — algoritmo vigente (Diseño §2.9):**
 
 ```
 {ruta-base}/{accion}/{fecha_envio}/{accion}_{timestamp_orden}_{external_reference}_{sku}.json
 ```
 
-| Componente | Valor | Fuente | Confianza |
-|---|---|---|---|
-| `ruta-base` | `siman` | ⚠️ **Reabierto 2026-07-15** — una petición real exitosa había confirmado `assembly` como carpeta raíz única, pero en producción esa misma ruta (mismas credenciales) empezó a responder `403 permission denied`. Se confirmó que la raíz correcta se divide por tipo de subida: `siman/create/` y `siman/update/` (la opción que se había descartado antes por error — ver Diseño §6.4.3). Ver §5 `application.yml`, `SOLUTIONONE_RUTA_BASE` | ⚠️ Revisado, pendiente de confirmación directa de UnoGroup sobre por qué `assembly/` funcionó en la prueba anterior |
-| `fecha_envio` | Fecha **actual** al momento de subir (no una fecha de negocio), formato `yyyyMMdd` | Ejemplo real: `20260713` — no coincide con ninguna fecha del contenido del JSON (`tracking_order_time` era `2026-04-10`), así que es la fecha de envío, no una fecha del pedido | ✅ Confirmado por descarte |
-| `accion` | `create` para creación, `update` para actualización | ✅ **Recibido explícitamente** en el campo `accion` de la notificación del Orquestador (§1.4.2/§1.4.4) — ya no se infiere ni se decide en `unogroup-app`. El Orquestador lo determina por su propia idempotencia (Diseño §9.6 F19) | ⚠ El uso del valor como segmento de carpeta (`/{accion}/`) y como prefijo de archivo es una decisión de diseño; el valor `update` en particular sigue sin un ejemplo real que lo confirme |
-| `timestamp_orden` | El valor de `tracking_order_time` **del pedido**, formateado `yyyyMMddHHmmss` — **no** la hora actual de envío | El ejemplo real (`20260410050000`) coincide exactamente con el `tracking_order_time` (`2026-04-10T05:00:00.000Z`) del JSON de creación correspondiente a esa misma orden | ✅ Confirmado por coincidencia exacta — vale la pena una validación explícita adicional antes de darlo por cerrado, ya que se infirió por coincidencia de valores, no por una aclaración directa de UnoGroup |
-| `external_reference` | `ordenId` | Directo | ✅ Confirmado |
-| `sku` | `sku` de la sub-orden. **Siempre incluido, en creación y en actualización** — aunque el body de actualización no lleva `item_sku` (§4.4), el nombre de archivo sí, y es lo que le permite a UnoGroup identificar la sub-orden exacta | ✅ **Decidido** (Diseño §9.6 F20) | ⚠ Decisión de diseño, no confirmación de UnoGroup |
+| Componente | Valor | Fuente |
+|---|---|---|
+| `ruta-base` | `siman` | Prefijo común; `SolutionOneFileNaming` agrega `/create` o `/update` según la `accion`. Historial de cómo se llegó a este valor: ver Bitácora de Diseño §3.3 (C3) |
+| `fecha_envio` | Fecha **actual** al momento de subir (no una fecha de negocio), formato `yyyyMMdd` |
+| `accion` | `create` para creación, `update` para actualización — recibido explícitamente en el campo `accion` de la notificación del Orquestador (§1.4.2/§1.4.4), nunca inferido en `unogroup-app` |
+| `timestamp_orden` | El valor de `tracking_order_time` **del pedido**, formateado `yyyyMMddHHmmss` — **no** la hora actual de envío |
+| `external_reference` | `ordenId`, directo |
+| `sku` | `sku` de la sub-orden. **Siempre incluido, en creación y en actualización** — aunque el body de actualización no lleva `item_sku` (§4.4), el nombre de archivo sí, y es lo que le permite a UnoGroup identificar la sub-orden exacta |
 
 **Implementación de referencia:**
 
@@ -248,7 +252,7 @@ public class SolutionOneFileNaming {
             Instant trackingOrderTime, String externalReference, String sku) {
         String fecha = FECHA_CARPETA.format(Instant.now());       // fecha de envío, no de negocio
         String timestamp = TIMESTAMP_ARCHIVO.format(trackingOrderTime); // del pedido, no "ahora"
-        // sku siempre incluido — en creación Y en actualización (Diseño §9.6 F20),
+        // sku siempre incluido — en creación Y en actualización (Bitácora de Diseño, F20),
         // aunque el body de actualización no lo lleve como campo (§4.4).
         String nombreArchivo = String.format("%s_%s_%s_%s.json", accion, timestamp, externalReference, sku);
         return String.format("%s/%s/%s/%s", rutaBase, accion, fecha, nombreArchivo);
@@ -262,7 +266,7 @@ public class SolutionOneFileNaming {
 
 - Traduce el `payload_enriquecido` recibido (lenguaje Siman) al formato binario que espera Solution One, vía `mapper`. El resultado de esa transformación se incluye en el callback (campo `payloadPartner`) para que el Orquestador lo persista — UnoGroup ya no lo guarda él mismo en ningún lado, solo lo reporta.
 
-**Mapeo confirmado esta sesión** (`Campo API` → `Campo Solution One`, ver Diseño §4.4 para los JSON de ejemplo completos):
+**Mapeo de campos** (`Campo API` → `Campo Solution One`, ver Diseño §4.4 para los JSON de ejemplo completos):
 
 | Campo API (`payload_enriquecido`) | Campo Solution One (`payload_partner`) | Solo creación |
 |---|---|---|
@@ -296,16 +300,16 @@ public class SolutionOneFileNaming {
 
 ⚠ **Dos huecos que siguen sin resolver, ninguno bloquea implementar el resto de la tabla:**
 - El campo API de `external_reference_alt_2` no tiene nombre asignado todavía (marcado `TBD` incluso en el mapeo ya confirmado — ver Diseño §4.3).
-- El valor de `service_type` para el flujo DARM no está confirmado (solo se vio `"armado"` en el ejemplo — ver Diseño §9.6 F18).
-- Construye el query param `path` — algoritmo confirmado, ver §1.4.7 — y siempre incluye `mkdir_parents=true` (ver Diseño §6.4.5 — evita que la ausencia de este parámetro se confunda con un error de permisos, `403`).
-- Gestiona el ciclo de JWT (`GET /api/v2/user/token`, renovación automática).
-- ✅ **Confirmado contra el ambiente de prueba real:** el body de la carga es binario (no serializado automáticamente por Feign) — sí requiere un `Encoder` de Feign personalizado, y `Content-Type: application/json` funciona para ese body binario (Diseño §9.6 F9, resuelto).
+- El valor de `service_type` para el flujo DARM no está confirmado (solo se vio `"armado"` en el ejemplo — ver Bitácora de Diseño, F18).
+- Construye el query param `path` — algoritmo confirmado, ver §1.4.7 — y siempre incluye `mkdir_parents=true` (ver Diseño §6.3 — evita que la ausencia de este parámetro se confunda con un error de permisos, `403`).
+- Gestiona la obtención del JWT (`GET /api/v2/user/token`) vía `SolutionOneTokenManager` — **sin caché entre solicitudes**: cada llamada a `procesar()` adquiere un token nuevo, y `SolutionOneRetryPolicy` vuelve a llamarlo una sola vez si la subida responde `401` (ver tabla de reintentos, Diseño §2.9). No hay estado de expiración cacheado en memoria.
+- ✅ **Confirmado contra el ambiente de prueba real:** el body de la carga es binario (no serializado automáticamente por Feign) — sí requiere un `Encoder` de Feign personalizado, y `Content-Type: application/json` funciona para ese body binario (Bitácora de Diseño, F9, resuelto).
 
 ### 1.4.8 `unogroup-app` — `callback`
 
 - `@FeignClient` hacia `orquestador-app`, endpoint `POST /internal/orquestador/solicitudes/resultado` (§1.4.4b).
 - Se invoca al terminar de procesar — éxito o fallo definitivo hacia Solution One, nunca a mitad de un reintento hacia Solution One (esa es una política distinta, ver §1.4.7).
-- ✅ **Resuelto (esta sesión) — política de reintentos:** dado que `unogroup-app` no persiste nada, perder esta llamada significa perder el resultado del procesamiento sin dejar ningún estado consultable salvo logs — merece más resiliencia que la notificación entrante (2-3 intentos, ver Diseño §2.11), pero sin llegar al backoff largo de Solution One (que existe para tolerar un tercero externo inestable, no un blip de red interna del clúster):
+**Política de reintentos:** dado que `unogroup-app` no persiste nada, perder esta llamada significa perder el resultado del procesamiento sin dejar ningún estado consultable salvo logs — merece más resiliencia que la notificación entrante (2-3 intentos, ver Diseño §2.11), pero sin llegar al backoff largo de Solution One (que existe para tolerar un tercero externo inestable, no un blip de red interna del clúster):
 
 | Parámetro | Valor |
 |---|---|
@@ -314,26 +318,24 @@ public class SolutionOneFileNaming {
 | Multiplicador | 2 (500ms → 1s → 2s → 4s → 8s ≈ 15.5s en total) |
 | Si se agotan los 5 intentos | Se registra en logs a nivel `ERROR`, en formato estructurado (incluyendo `ordenId`, `sku`, `resultadoFinal` y el detalle completo de `intentos[]`) — no se descarta el resultado, queda recuperable manualmente desde logs aunque no exista un estado consultable en base de datos. |
 
-- La reconciliación (zona 3, Diseño §2.11/§9.6 F16) sigue siendo necesaria como red de seguridad final — este reintento reduce drásticamente la probabilidad de llegar a esa zona (cubre blips transitorios, que son la inmensa mayoría de los casos), pero no la elimina: si `orquestador-app` está caído más de ~15.5s seguidos, el callback se agota igual y la reconciliación es lo único que queda.
+- La reconciliación (zona 3, Diseño §2.11 / Bitácora de Diseño F16) sigue siendo necesaria como red de seguridad final — este reintento reduce drásticamente la probabilidad de llegar a esa zona (cubre blips transitorios, que son la inmensa mayoría de los casos), pero no la elimina: si `orquestador-app` está caído más de ~15.5s seguidos, el callback se agota igual y la reconciliación es lo único que queda.
 
 ---
 
 # 2. DDL MySQL
 
-**Módulo:** `orquestador-app` — el DDL en sí no vive en un módulo Maven (es SQL, no Java), pero se versiona junto al código de `orquestador-app` porque describe exactamente las entidades que ese módulo expone. Único módulo con acceso a esta base de datos (esta sesión — ver §1.1).
+**Módulo:** `orquestador-app` — el DDL en sí no vive en un módulo Maven (es SQL, no Java), pero se versiona junto al código de `orquestador-app` porque describe exactamente las entidades que ese módulo expone. Único módulo con acceso a esta base de datos (ver §1.1).
 
 ```sql
 -- ============================================================
 -- Sistema de Ensambles — DDL MySQL 8.0+
--- Base de datos compartida entre orquestador-app y unogroup-app
--- (decisión consciente, ver Diseño §2.6)
+-- Propiedad exclusiva de orquestador-app (ver Diseño §2.6) —
+-- unogroup-app no tiene acceso a esta base de datos.
 -- ============================================================
 -- Modelo: cada sub-orden (orden_id + sku) es la unidad atómica.
 -- Un orden_id puede tener N sub-órdenes (pedido multi-ítem).
 -- Nomenclatura en lenguaje Siman desde el inicio (orden_id, no
--- externorderkey) — a diferencia de la v1 de este documento, que
--- arrastraba el nombre crudo de WMS y quedó como hallazgo pendiente
--- de corregir. En v2 se define correctamente desde el DDL.
+-- externorderkey, que es el nombre crudo de WMS).
 -- ============================================================
 
 SET time_zone = '+00:00';
@@ -343,7 +345,7 @@ SET time_zone = '+00:00';
 -- Escritura: exclusiva de orquestador-app (creación, enriquecimiento,
 -- y transición final al recibir el callback de unogroup-app) — ver
 -- Diseño §2.6.1, tabla de dueño de escritura. unogroup-app no tiene
--- acceso a esta base de datos (cambio de esta sesión).
+-- acceso a esta base de datos.
 -- ----------------------------------------------------------
 CREATE TABLE ensamble_solicitud (
     id                  BIGINT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -370,11 +372,6 @@ CREATE TABLE ensamble_solicitud (
     nombre_archivo      VARCHAR(120),
     fecha_creacion      TIMESTAMP(6)    NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     fecha_actualizacion TIMESTAMP(6)    NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-    fecha_orden         TIMESTAMP(6),
-    fecha_despacho_plan TIMESTAMP(6),
-    fecha_entrega_plan  TIMESTAMP(6),
-    fecha_despacho_real TIMESTAMP(6),
-    fecha_entrega_real  TIMESTAMP(6),
 
     CONSTRAINT uq_ensamble_solicitud_orden_sku UNIQUE (orden_id, sku),
 
@@ -439,12 +436,16 @@ CREATE INDEX ix_ensamble_historial_solicitud ON ensamble_solicitud_historial (so
 -- ----------------------------------------------------------
 -- Bitácora HTTP hacia Solution One. Escritura exclusiva de
 -- orquestador-app, poblada a partir del callback que reporta
--- unogroup-app (esta sesión: unogroup-app ya no tiene acceso a
--- base de datos — reporta, no escribe).
+-- unogroup-app (unogroup-app no tiene acceso a base de datos —
+-- reporta, no escribe).
 -- Sin columna `ambiente` (eliminada en v2 — ver Diseño §2.6,
 -- el perfil stub ya no existe).
 -- Sin solicitud_reintento (eliminada en v2 — reintentos
 -- síncronos en el mismo hilo, ver Diseño §2.11).
+--
+-- Nota: `url`/`metodo_http` son NOT NULL aquí, pero el contrato del
+-- callback (Diseño §2.4) nunca los provee — ver Bitácora de
+-- Implementación §2.1 para el workaround actual y el pendiente real.
 -- ----------------------------------------------------------
 CREATE TABLE ensamble_bitacora_partner (
     id                  BIGINT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -455,8 +456,8 @@ CREATE TABLE ensamble_bitacora_partner (
     tipo_peticion       VARCHAR(20)     NOT NULL,   -- 'AUTH_TOKEN' | 'UPLOAD_CREATE' | 'UPLOAD_UPDATE'
     nombre_archivo      VARCHAR(120),
 
-    url                 VARCHAR(500)    NOT NULL,
-    metodo_http         VARCHAR(10)     NOT NULL,
+    url                 VARCHAR(500)    NOT NULL,   -- ver nota arriba
+    metodo_http         VARCHAR(10)     NOT NULL,   -- ver nota arriba
 
     codigo_http         SMALLINT,
     duracion_ms         INT,
@@ -531,7 +532,7 @@ CREATE INDEX ix_ensamble_bitacora_exitoso_fecha ON ensamble_bitacora_partner (ex
 
 # 3. Entidades JPA
 
-**Módulo:** `orquestador-app` (`domain/`) — único módulo que las usa; movidas aquí esta sesión al eliminar `ensambles-common` (§1.1).
+**Módulo:** `orquestador-app` (`domain/`) — único módulo que las usa (ver §1.1).
 
 ```java
 package com.siman.ensambles.orquestador.domain;
@@ -594,17 +595,6 @@ public class SolicitudEnsamble {
 
     @Column(name = "fecha_actualizacion", nullable = false)
     private Instant fechaActualizacion;
-
-    @Column(name = "fecha_orden")
-    private Instant fechaOrden;
-    @Column(name = "fecha_despacho_plan")
-    private Instant fechaDespachoPlan;
-    @Column(name = "fecha_entrega_plan")
-    private Instant fechaEntregaPlan;
-    @Column(name = "fecha_despacho_real")
-    private Instant fechaDespachoReal;
-    @Column(name = "fecha_entrega_real")
-    private Instant fechaEntregaReal;
 
     @OneToMany(mappedBy = "solicitud", fetch = FetchType.LAZY, cascade = CascadeType.ALL)
     @Builder.Default
@@ -715,7 +705,9 @@ public class BitacoraPartner {
     private String errorMensaje;
 
     @Column(name = "intento_num", nullable = false)
-    private Integer intentoNum;
+    private Byte intentoNum;   // Byte, no Integer — coincide con el tipo TINYINT del DDL;
+                               // Hibernate exige el tipo exacto cuando valida el schema
+                               // contra la columna existente (ddl-auto: validate).
 
     @Column(name = "es_reintento", nullable = false, length = 1)
     private String esReintento;          // 'S' | 'N'
@@ -728,7 +720,7 @@ public class BitacoraPartner {
 }
 ```
 
-**Sobre `@Data` y relaciones lazy (heredado de v1, sigue aplicando):** se evita `@Data` en entidades JPA porque genera `equals()`/`hashCode()`/`toString()` sobre todos los campos, incluyendo asociaciones lazy — fuerza su inicialización fuera de sesión y puede disparar `LazyInitializationException`. Se usa `@Getter`/`@Setter`/`@Builder` explícitos.
+**Sobre `@Data` y relaciones lazy:** se evita `@Data` en entidades JPA porque genera `equals()`/`hashCode()`/`toString()` sobre todos los campos, incluyendo asociaciones lazy — fuerza su inicialización fuera de sesión y puede disparar `LazyInitializationException`. Se usa `@Getter`/`@Setter`/`@Builder` explícitos.
 
 **Enums (`orquestador-app/domain/enums`):**
 
@@ -775,13 +767,13 @@ public enum TrackingStatus {
 }
 ```
 
-> ⚠ **Riesgo aceptado conscientemente:** al duplicar estos enums en vez de compartirlos vía un módulo Maven, existe la posibilidad de que ambas copias se desincronicen si alguien cambia un valor en una app y olvida replicarlo en la otra. Se acepta este riesgo a cambio de independencia total de build entre los dos microservicios — la fuente de verdad real es el contrato OpenAPI (`HUENSA-001_openapi_v2.yaml`), donde estos mismos valores están declarados como `enum:` en los schemas correspondientes; conviene validar contra ese archivo, no asumir que el código Java de una app es la referencia para la otra.
+**Nota:** estos enums están duplicados, no se comparten vía un módulo Maven — la fuente de verdad es el contrato OpenAPI (`HUENSA-001_openapi_V2.yaml`), donde los mismos valores están declarados como `enum:` en los schemas correspondientes; conviene validar contra ese archivo, no asumir que el código Java de una app es la referencia para la otra. El riesgo de desincronización entre ambas copias, y el trade-off frente a compartirlas vía módulo común, está documentado en la Bitácora de Implementación §2.3.
 
 ---
 
 # 4. `application.yml` — `orquestador-app`
 
-**Nota importante antes del archivo:** la v1 de este documento tenía configuración de **consumer pull** de Pub/Sub (`spring.cloud.gcp.pubsub.subscriber.parallel-pull-count`, etc.). Eso ya no aplica — el diagrama de infraestructura confirmó que el mecanismo es **push vía Ingress** (ver Diseño §2.1), no un listener que jala mensajes. En modo push, `orquestador-app` no necesita configuración de *subscriber* de Pub/Sub en absoluto — es, desde el punto de vista de Spring Boot, simplemente un controller REST más. Lo que **sí** necesita, y que la v1 no tenía porque no aplicaba al patrón pull, es **validación del JWT que Pub/Sub adjunta a cada push** (para confirmar que la petición realmente viene de Pub/Sub y no de cualquiera que descubra la URL del Ingress).
+**Nota sobre Pub/Sub:** el mecanismo de entrada es **push vía Ingress** (ver Diseño §2.1), no un listener que jala mensajes — `orquestador-app` no tiene configuración de *subscriber* de Pub/Sub; es, desde el punto de vista de Spring Boot, simplemente un controller REST más. Lo que sí necesita es **validación del JWT que Pub/Sub adjunta a cada push** (para confirmar que la petición realmente viene de Pub/Sub y no de cualquiera que descubra la URL del Ingress).
 
 ```yaml
 # ============================================================
@@ -825,8 +817,8 @@ server:
 # ----------------------------------------------------------
 ensambles:
 
-  # Validación del push de Pub/Sub — reemplaza la config de
-  # "subscriber" que tenía la v1 de este documento (pull).
+  # Validación del push de Pub/Sub — ver nota sobre el mecanismo
+  # push vía Ingress al inicio de esta sección.
   pubsub-push:
     # Pub/Sub firma cada request push con un JWT de identidad de
     # la cuenta de servicio configurada al crear la suscripción.
@@ -835,8 +827,8 @@ ensambles:
     cuenta-servicio-esperada: ${PUBSUB_PUSH_SERVICE_ACCOUNT:}   # obligatorio, sin default — Secret/ConfigMap de GKE
 
   # Cliente hacia unogroup-app — notificación con payload_enriquecido
-  # completo (ya no un claim-check, esta sesión) — vía Service de
-  # Kubernetes, DNS interno del clúster.
+  # completo (no una referencia) — vía Service de Kubernetes, DNS
+  # interno del clúster.
   unogroup-client:
     base-url: ${UNOGROUP_APP_URL:http://svc-unogroup.ensambles.svc.cluster.local}
     timeout-conexion-ms: ${UNOGROUP_CLIENT_TIMEOUT_CONN_MS:2000}
@@ -850,10 +842,12 @@ ensambles:
 
   # Job de reconciliación (Diseño §2.11) — red de seguridad para
   # las tres zonas atascadas (RECIBIDA sin enriquecer, ENRIQUECIDA
-  # sin notificar al UnoGroup, notificada sin callback recibido —
-  # esta tercera zona es nueva esta sesión, ver Diseño §9.6 F16).
-  # Intervalo exacto aún sin cerrar (Diseño §9.6 F7) — el default
-  # de abajo es un punto de partida, no una decisión final.
+  # sin notificar al UnoGroup, notificada sin callback recibido,
+  # ver Bitácora de Diseño, F16). Intervalo exacto aún sin cerrar
+  # (Bitácora de Diseño, F7) — el default de abajo es un punto de
+  # partida, no una decisión final.
+  # ⚠ Diseño de referencia: esta sección (y el job en sí, §1.4.5)
+  # todavía no existen en el código — ver Bitácora de Implementación §2.1.
   reconciliation:
     habilitado: ${RECONCILIATION_HABILITADO:true}
     intervalo-cron: ${RECONCILIATION_CRON:0 */15 * * * *}   # cada 15 min — ⚠ TBD, valor final sin confirmar
@@ -862,9 +856,11 @@ ensambles:
     umbral-callback-minutos: ${RECONCILIATION_UMBRAL_CALLBACK_MIN:10}   # ⚠ TBD F16 — mecanismo de detección aún sin definir
 
   # Endpoint que recibe el callback de unogroup-app con el resultado
-  # (nuevo, esta sesión — ver §1.4.4b). Mismo mecanismo de auth
-  # pendiente que la notificación en sentido contrario (Diseño §9.6 F8).
+  # (ver §1.4.4b). Mismo mecanismo de auth pendiente que la
+  # notificación en sentido contrario (Bitácora de Diseño, F8).
   callback-receiver:
+    # ⚠ Esta clave existe pero hoy no tiene ningún efecto — ver
+    # Bitácora de Implementación §2.1.
     autenticacion-habilitada: ${CALLBACK_RECEIVER_AUTH_HABILITADA:false}   # ⚠ TBD — ver Diseño F8
 
   # Fuentes de enriquecimiento (Diseño §4.1/§4.2, columna "consulta:")
@@ -879,14 +875,13 @@ logging:
   level:
     root: INFO
     com.siman.ensambles.orquestador: ${LOG_LEVEL_APP:INFO}
-    # Nunca DEBUG en producción sin enmascarado — mismo principio de
-    # logging/PII heredado de v1 (nombre, teléfono, correo, dirección
-    # nunca en texto plano incluso en debug).
+    # Nunca DEBUG en producción sin enmascarado — nombre, teléfono,
+    # correo, dirección nunca en texto plano incluso en debug.
 ```
 
 **Puntos que quedan explícitamente abiertos con este archivo, no resueltos por defaults razonables:**
-- `PUBSUB_PUSH_SERVICE_ACCOUNT` no tiene default — es una credencial de configuración, no un secreto en sí, pero se deja sin valor por defecto para forzar su definición explícita antes de aceptar tráfico real (mismo principio que ya usaban en v1 para credenciales de Solution One).
-- Las URLs de `rms`/`wms-api` están vacías a propósito — todavía no existe una fuente confirmada para varios de los campos que el Orquestador necesita completar (Diseño §9.6, preguntas A5 y equivalentes de Guías Manuales).
+- `PUBSUB_PUSH_SERVICE_ACCOUNT` no tiene default — es una credencial de configuración, no un secreto en sí, pero se deja sin valor por defecto para forzar su definición explícita antes de aceptar tráfico real (mismo principio que las credenciales de Solution One, §5).
+- Las URLs de `rms`/`wms-api` están vacías a propósito — todavía no existe una fuente confirmada para varios de los campos que el Orquestador necesita completar (Bitácora de Diseño, preguntas A5 y equivalentes de Guías Manuales).
 - El cron de reconciliación tiene un valor de arranque (`*/15`) pero sigue siendo un placeholder hasta que se cierre F7.
 
 ---
@@ -906,7 +901,7 @@ server:
 
 # ----------------------------------------------------------
 # OpenFeign — dos clientes: hacia Solution One y hacia el
-# callback de orquestador-app (nuevo, esta sesión)
+# callback de orquestador-app
 # ----------------------------------------------------------
 feign:
   client:
@@ -937,14 +932,11 @@ ensambles:
       # explícita vía Secret Manager antes de poder llamar a Solution One real.
       usuario: ${SOLUTIONONE_USUARIO:}
       password: ${SOLUTIONONE_PASSWORD:}
-      # ⚠️ Reabierto 2026-07-15 (Diseño §2.9/§6.4.3, C3): "assembly" se había
-      # confirmado como carpeta raíz con una petición real exitosa, pero
-      # producción empezó a responder 403/permission denied en esa misma
-      # ruta con las mismas credenciales. La raíz real se divide por tipo
-      # de subida — SolutionOneFileNaming agrega /create o /update, así
-      # que esta propiedad ahora es solo el prefijo común ("siman").
+      # Prefijo común de ruta — SolutionOneFileNaming agrega /create o
+      # /update según la acción (ver §1.4.7; historial en Bitácora de
+      # Diseño §3.3, C3).
       ruta-base: ${SOLUTIONONE_RUTA_BASE:siman}
-      # Confirmado en Diseño §6.4.5 — debe ser true en producción; false
+      # Confirmado en Diseño §6.3 — debe ser true en producción; false
       # expone el sistema a 403 cuando la carpeta padre no existe todavía.
       # Configurable (no fijo) a pedido — usar con cuidado: cambiarlo a
       # false sin que la carpeta destino exista se traduce en 403, que
@@ -959,8 +951,8 @@ ensambles:
         backoff-multiplicador: 2
 
   # Endpoint interno que recibe la notificación del Orquestador
-  # (payload_enriquecido completo, ya no un claim-check).
-  # ⚠ TBD (Diseño §9.6 F8): mecanismo de autenticación entre
+  # (payload_enriquecido completo).
+  # ⚠ TBD (Bitácora de Diseño, F8): mecanismo de autenticación entre
   # servicios dentro del clúster — hoy no hay ninguno definido más
   # allá de que el Service es ClusterIP (no alcanzable desde fuera
   # del clúster). Si se decide agregar algo (ej. token compartido,
@@ -973,13 +965,13 @@ ensambles:
   # resultado final y el detalle de cada intento (incluyendo AUTH_TOKEN).
   callback:
     orquestador-url: ${ORQUESTADOR_APP_URL:http://svc-orquestador.ensambles.svc.cluster.local}
-    # ✅ Resuelto (esta sesión, §1.4.8): más intentos que el reintento
-    # corto de la notificación entrante (blips de red interna), sin
+    # Más intentos que el reintento corto de la notificación entrante
+    # (blips de red interna), sin
     # llegar al backoff largo de Solution One (tercero externo inestable,
     # no comparable con un blip dentro del clúster). Si se agotan los 5
     # intentos, el resultado se registra en logs a nivel ERROR (formato
     # estructurado, recuperable manualmente) y queda en manos de la
-    # reconciliación (zona 3, Diseño §2.11/§9.6 F16) como red de seguridad final.
+    # reconciliación (zona 3, Diseño §2.11 / Bitácora de Diseño F16) como red de seguridad final.
     reintentos:
       max-intentos: ${CALLBACK_MAX_INTENTOS:5}
       backoff-inicial-ms: ${CALLBACK_BACKOFF_MS:500}
@@ -989,25 +981,23 @@ logging:
   level:
     root: INFO
     com.siman.ensambles.unogroup: ${LOG_LEVEL_APP:INFO}
-    # Mismo principio de v1: nunca loguear payload completo con PII en
-    # INFO o superior. A nivel DEBUG, enmascarado (nunca en texto plano).
+    # Nunca loguear payload completo con PII en INFO o superior.
+    # A nivel DEBUG, enmascarado (nunca en texto plano).
 ```
 
-**Diferencias notables frente al `application.yml` de `orquestador-app` (§4), y por qué:**
-- **`unogroup-app` no tiene sección `spring.datasource`/`spring.jpa` en absoluto** — cambio de esta sesión: ya no accede a MySQL de ninguna forma. Confirma en configuración lo que ya establecimos en el Diseño (§2.3): es un servicio sin estado.
+**Diferencias frente al `application.yml` de `orquestador-app` (§4):**
+- **`unogroup-app` no tiene sección `spring.datasource`/`spring.jpa`** — no accede a MySQL de ninguna forma. Confirma en configuración lo que ya establece el Diseño (§2.3): es un servicio sin estado.
 - **Solo `unogroup-app` tiene la sección `adapter.solutionone`** con credenciales — confirma lo que el diagrama de infraestructura ya mostraba: solo este pod accede a Secret Manager para las credenciales de UnoGroup.
-- **No hay sección de Pub/Sub** en absoluto — `unogroup-app` nunca consume eventos, solo recibe la notificación interna del Orquestador.
-- **`mkdir-parents` es configurable vía variable de entorno** (`SOLUTIONONE_MKDIR_PARENTS`, default `true`) — a pedido explícito. El default sigue siendo `true` para no reproducir por accidente el escenario de 403 documentado en el Diseño §6.4.5, pero queda como interruptor disponible si el equipo lo necesita.
-- **`notificacion.autenticacion-habilitada` queda en `false` por defecto** — no porque sea la decisión final, sino porque F8 (Diseño §9.6) sigue sin resolver y no quiero inventar un mecanismo de autenticación no acordado; lo dejo como interruptor explícito para cuando se decida.
-- **Aparece `ensambles.callback`** — nuevo esta sesión, la config del cliente Feign que reporta el resultado de vuelta al Orquestador. Su política de reintentos queda deliberadamente sin decidir (ver comentario en el YAML).
+- **No hay sección de Pub/Sub** — `unogroup-app` nunca consume eventos, solo recibe la notificación interna del Orquestador.
+- **`mkdir-parents` es configurable vía variable de entorno** (`SOLUTIONONE_MKDIR_PARENTS`, default `true`) — el default sigue siendo `true` para no reproducir por accidente el escenario de 403 documentado en el Diseño §6.3, pero queda como interruptor disponible si el equipo lo necesita.
+- **`notificacion.autenticacion-habilitada` queda en `false` por defecto** — no es la decisión final; F8 (Bitácora de Diseño) sigue sin resolver, y queda como interruptor explícito para cuando se decida.
+- **Aparece `ensambles.callback`** — la config del cliente Feign que reporta el resultado de vuelta al Orquestador. Su política de reintentos queda deliberadamente sin decidir (ver comentario en el YAML).
 
 ---
 
 # 6. Dependencias Maven
 
-**Nota respecto a v1:** desaparecen dos dependencias que la v1 de este documento sí tenía, por dos razones distintas:
-- **`com.h2database:h2`** — existía "para perfil `local-stub`". El stub ya no existe (decisión de esta sesión, ambiente de prueba real disponible) — no hay ningún perfil que necesite una base de datos en memoria.
-- **`spring-cloud-gcp-starter-pubsub`** — existía para el patrón *pull* de v1. Con el mecanismo confirmado como *push vía Ingress* (Diseño §2.1), `orquestador-app` no consume la API de suscriptor de GCP en absoluto — Pub/Sub le habla por HTTP como a cualquier otro cliente REST. En su lugar, aparece una dependencia nueva para **validar el JWT que Pub/Sub adjunta a cada push** (ver §4).
+`orquestador-app` no depende de `spring-cloud-gcp-starter-pubsub` — con el mecanismo de entrada confirmado como *push vía Ingress* (Diseño §2.1), no consume la API de suscriptor de GCP en absoluto: Pub/Sub le habla por HTTP como a cualquier otro cliente REST. En su lugar, depende de `spring-boot-starter-oauth2-resource-server` para **validar el JWT que Pub/Sub adjunta a cada push** (ver §4). Tampoco depende de `com.h2database:h2` — no hay ningún perfil que necesite una base de datos en memoria; el ambiente de prueba real ya está disponible.
 
 ## 6.1 `orquestador-app/pom.xml`
 
@@ -1144,6 +1134,9 @@ logging:
     <!-- Debe mantenerse igual a la de orquestador-app/pom.xml (§6.1) —
          ya no hay un pom padre común que lo imponga automáticamente. -->
     <spring-cloud.version>2025.1.2</spring-cloud.version>
+    <mapstruct.version>1.6.3</mapstruct.version>
+    <!-- Solo para pruebas — no forman parte del contrato ni del runtime. -->
+    <wiremock.version>3.9.2</wiremock.version>
   </properties>
 
   <dependencyManagement>
@@ -1154,6 +1147,22 @@ logging:
         <version>${spring-cloud.version}</version>
         <type>pom</type>
         <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.mapstruct</groupId>
+        <artifactId>mapstruct</artifactId>
+        <version>${mapstruct.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.mapstruct</groupId>
+        <artifactId>mapstruct-processor</artifactId>
+        <version>${mapstruct.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.wiremock</groupId>
+        <artifactId>wiremock-standalone</artifactId>
+        <version>${wiremock.version}</version>
+        <scope>test</scope>
       </dependency>
     </dependencies>
   </dependencyManagement>
@@ -1166,6 +1175,14 @@ logging:
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>
     </dependency>
+    <!-- Añadida durante la implementación (no estaba en una versión anterior
+         de esta lista): expone /actuator/health/readiness y
+         /actuator/health/liveness, referenciados por los probes del
+         Deployment (§7.3) — sin esta dependencia esos endpoints no existen. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-validation</artifactId>
@@ -1177,6 +1194,29 @@ logging:
       <groupId>org.springframework.cloud</groupId>
       <artifactId>spring-cloud-starter-openfeign</artifactId>
     </dependency>
+    <!-- Añadida durante la implementación: spring-cloud-starter-openfeign no
+         trae feign-jackson por defecto (usa los HttpMessageConverters de
+         Spring) — se necesita explícitamente como fallback dentro de
+         SolutionOneBinaryEncoder (ver más abajo) para las llamadas del mismo
+         cliente que sí son JSON (ej. GET /api/v2/user/token). -->
+    <dependency>
+      <groupId>io.github.openfeign</groupId>
+      <artifactId>feign-jackson</artifactId>
+    </dependency>
+    <!-- Añadida durante la implementación: Spring Boot 4.x usa internamente
+         un ObjectMapper de "Jackson 3" (tools.jackson), incompatible con
+         com.fasterxml.jackson.databind — no hay bean Spring del tipo
+         Jackson 2 para autowire. Como SolutionOneCreatePayload/UpdatePayload
+         usan anotaciones Jackson 2 (mismo Jackson que feign-jackson, arriba),
+         SolicitudProcesamientoService construye su propio ObjectMapper
+         Jackson 2 en vez de depender de la autoconfiguración de Spring —
+         esta dependencia trae jackson-datatype-jsr310 para serializar los
+         campos Instant con ese ObjectMapper. -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+      <version>2.21.4</version>
+    </dependency>
 
     <dependency>
       <groupId>org.projectlombok</groupId>
@@ -1187,6 +1227,26 @@ logging:
       <groupId>org.mapstruct</groupId>
       <artifactId>mapstruct</artifactId>
     </dependency>
+    <dependency>
+      <groupId>org.mapstruct</groupId>
+      <artifactId>mapstruct-processor</artifactId>
+      <scope>provided</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Añadida durante la implementación: simula Solution One y el
+         endpoint de callback de orquestador-app en los tests de
+         SolutionOneRetryPolicy y OrquestadorCallbackSender — no forma
+         parte del contrato ni del runtime (scope test). -->
+    <dependency>
+      <groupId>org.wiremock</groupId>
+      <artifactId>wiremock-standalone</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
@@ -1195,12 +1255,29 @@ logging:
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
       </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <annotationProcessorPaths>
+            <path>
+              <groupId>org.projectlombok</groupId>
+              <artifactId>lombok</artifactId>
+            </path>
+            <path>
+              <groupId>org.mapstruct</groupId>
+              <artifactId>mapstruct-processor</artifactId>
+              <version>${mapstruct.version}</version>
+            </path>
+          </annotationProcessorPaths>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
 </project>
 ```
 
-**Confirmado contra el ambiente de prueba real (ya no es una nota pendiente, ver Diseño §9.6 F9 — resuelto):** `spring-cloud-starter-openfeign` trae por defecto un encoder basado en Jackson (JSON), pero la carga hacia Solution One es un **body binario** (Diseño §2.9/§6.1) — ninguna de estas dependencias resuelve eso automáticamente, hace falta un `Encoder` de Feign personalizado dentro de `unogroup-app/client` (antes `unogroup-app/adapter/solutionone`, aplanado esta sesión — ver §1.4). Se probó contra el ambiente de prueba real: **`Content-Type: application/json` funciona** para ese body binario — no hace falta `application/octet-stream` ni una librería adicional (`feign-okhttp` u otra) para esto. Ejemplo del encoder:
+`spring-cloud-starter-openfeign` trae por defecto un encoder basado en Jackson (JSON), pero la carga hacia Solution One es un **body binario** (Diseño §2.9/§6.1) — ninguna de las dependencias listadas arriba resuelve eso automáticamente: hace falta un `Encoder` de Feign personalizado dentro de `unogroup-app/client`. Contra el ambiente de prueba real, **`Content-Type: application/json` funciona** para ese body binario — no hace falta `application/octet-stream` ni una librería adicional (`feign-okhttp` u otra). Ejemplo del encoder:
 
 ```java
 package com.siman.ensambles.unogroup.client;
@@ -1231,17 +1308,46 @@ public class SolutionOneBinaryEncoder implements Encoder {
 
 **Decisión:** Dockerfile y manifiestos de Kubernetes describen cómo corre el código de este documento — no son recursos de infraestructura compartida (eso es Terraform: clúster, instancia, tópico, secretos como *servicio*, ver §8). Se documentan aquí, junto al código que despliegan, **dentro del mismo repositorio Git de cada app** (§1.1) — no centralizados en una carpeta de infra separada ni en un tercer repositorio.
 
-```
-repositorio: orquestador-app             repositorio: unogroup-app
-(raíz del repo)                          (raíz del repo)
+**Repositorio `orquestador-app`:**
 
-pom.xml                                   pom.xml
-src/                                      src/
-Dockerfile                                Dockerfile
-k8s/                                      k8s/
-├── deployment.yaml                       ├── deployment.yaml
-└── service.yaml                          └── service.yaml
 ```
+orquestador-app/
+├── pom.xml
+├── src/
+├── Dockerfile
+└── k8s/
+    ├── deployment.yaml
+    └── service.yaml
+```
+
+**Repositorio `unogroup-app`:**
+
+```
+unogroup-app/
+├── pom.xml
+├── src/
+├── Dockerfile
+└── k8s/
+    ├── base/
+    │   ├── deployment.yaml
+    │   ├── service.yaml
+    │   ├── configmap.yaml
+    │   ├── secret.yaml
+    │   ├── serviceaccount.yaml
+    │   └── kustomization.yaml
+    └── overlays/
+        ├── local/
+        │   ├── kustomization.yaml
+        │   ├── deployment-patch.yaml
+        │   └── configmap-patch.yaml
+        └── prod/
+            ├── kustomization.yaml
+            ├── deployment-patch.yaml
+            ├── serviceaccount-patch.yaml
+            └── configmap-patch.yaml
+```
+
+> ⚠ **Estado de `orquestador-app/k8s` sin confirmar.** La columna `orquestador-app` de arriba es la estructura originalmente diseñada (manifiestos planos). `unogroup-app/k8s` sí evolucionó a **Kustomize** (`base/` + `overlays/{local,prod}`, detalle en §7.3) durante la implementación — queda pendiente confirmar si `orquestador-app/k8s` tuvo una evolución equivalente (ver Bitácora de Implementación §2.2, ítem 7 de §4).
 
 ## 7.1 Dockerfile — `orquestador-app` (y `unogroup-app`, mismo patrón)
 
@@ -1279,6 +1385,8 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 ```
 
 ## 7.2 Kubernetes — `orquestador-app`
+
+> ⚠ **Sin confirmar contra el repositorio real** — ver nota al inicio de §7. El YAML de abajo es la estructura originalmente diseñada; puede no reflejar el estado actual del repositorio de `orquestador-app`.
 
 ```yaml
 # orquestador-app/k8s/deployment.yaml
@@ -1350,13 +1458,14 @@ spec:
 
 ## 7.3 Kubernetes — `unogroup-app`
 
+`unogroup-app/k8s` usa **Kustomize**: una capa `base/` con los recursos comunes, y overlays por ambiente (`local`, `prod`) que la parchean. El `namespace` no se repite en cada manifiesto — lo fija una sola vez `base/kustomization.yaml`. Los valores de imagen/tag no son un placeholder de texto dentro del YAML del Deployment — son un transformer de Kustomize (`images:`) en cada overlay, sustituido en CI vía `kustomize edit set image`.
+
 ```yaml
-# unogroup-app/k8s/deployment.yaml
+# unogroup-app/k8s/base/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: unogroup-app
-  namespace: ensambles
 spec:
   replicas: 2
   selector:
@@ -1373,7 +1482,8 @@ spec:
                                              # secretos de Solution One.
       containers:
         - name: unogroup-app
-          image: TBD_REGISTRY/unogroup-app:TBD_TAG
+          image: unogroup-app:base   # nombre/tag reales via `images:` en overlays/*
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           envFrom:
@@ -1381,22 +1491,27 @@ spec:
                 name: unogroup-app-config          # SOLUTIONONE_BASE_URL, ORQUESTADOR_APP_URL, timeouts, etc.
             - secretRef:
                 name: unogroup-app-solutionone-secret  # SOLUTIONONE_USUARIO, SOLUTIONONE_PASSWORD
+          resources:
+            requests:
+              cpu: 250m
+              memory: 384Mi
+            limits:
+              cpu: 1
+              memory: 768Mi
           readinessProbe:
             httpGet: { path: /actuator/health/readiness, port: 8080 }
             initialDelaySeconds: 10
           livenessProbe:
             httpGet: { path: /actuator/health/liveness, port: 8080 }
             initialDelaySeconds: 20
-        # Sin sidecar cloud-sql-auth-proxy — cambio de esta sesión: unogroup-app
-        # ya no accede a MySQL (Diseño §2.3/§2.4). Su Deployment queda con un
-        # solo contenedor.
+        # Sin sidecar cloud-sql-auth-proxy — unogroup-app no accede a MySQL
+        # (Diseño §2.3/§2.4). Su Deployment queda con un solo contenedor.
 ---
-# unogroup-app/k8s/service.yaml
+# unogroup-app/k8s/base/service.yaml
 apiVersion: v1
 kind: Service
 metadata:
   name: svc-unogroup
-  namespace: ensambles
 spec:
   type: ClusterIP   # solo alcanzable dentro del clúster — nunca expuesto
                      # fuera de GKE (Diseño §2.3)
@@ -1405,45 +1520,132 @@ spec:
   ports:
     - port: 80
       targetPort: 8080
+---
+# unogroup-app/k8s/base/serviceaccount.yaml
+# Workload Identity — distinto del SA del Orquestador: solo este tiene
+# permiso IAM sobre los secretos de Solution One en GCP Secret Manager.
+# El binding GSA <-> KSA (anotación iam.gke.io/gcp-service-account) es
+# específico de cada ambiente/proyecto GCP y se agrega vía overlays/prod.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: unogroup-app-sa
+---
+# unogroup-app/k8s/base/configmap.yaml
+# Valores por defecto — reflejan los defaults de src/main/resources/application.yml.
+# Los overlays sobreescriben solo las claves que difieren por ambiente.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unogroup-app-config
+data:
+  SERVER_PORT: "8080"
+  SOLUTIONONE_BASE_URL: "https://data.solution1.us"
+  SOLUTIONONE_TOKEN_PATH: "/api/v2/user/token"
+  SOLUTIONONE_UPLOAD_PATH: "/api/v2/user/files/upload"
+  SOLUTIONONE_RUTA_BASE: "siman"
+  SOLUTIONONE_MKDIR_PARENTS: "true"
+  SOLUTIONONE_MAX_INTENTOS: "5"
+  SOLUTIONONE_BACKOFF_MS: "1000"
+  SOLUTIONONE_TIMEOUT_CONN_MS: "3000"
+  SOLUTIONONE_TIMEOUT_READ_MS: "5000"
+  SOLUTIONONE_FEIGN_LOG_LEVEL: "basic"
+  DARM_SERVICE_TYPE: "armado"   # ⚠ TBD F18 — ver Bitácora de Diseño
+  NOTIFICACION_AUTH_HABILITADA: "false"   # ⚠ TBD F8 — ver Bitácora de Diseño
+  ORQUESTADOR_APP_URL: "http://svc-orquestador.ensambles.svc.cluster.local"
+  CALLBACK_TIMEOUT_CONN_MS: "2000"
+  CALLBACK_TIMEOUT_READ_MS: "3000"
+  CALLBACK_FEIGN_LOG_LEVEL: "basic"
+  CALLBACK_MAX_INTENTOS: "5"
+  CALLBACK_BACKOFF_MS: "500"
+  LOG_LEVEL_APP: "INFO"
+---
+# unogroup-app/k8s/base/secret.yaml
+# PLACEHOLDER — no reales. Nunca commitear usuario/password reales aquí.
+# Cada ambiente debe reemplazar estos valores antes de aplicar (kubectl
+# create secret --dry-run + apply, sealed-secrets, SOPS, o un ExternalSecret
+# respaldado por GCP Secret Manager — unogroup-app-sa ya tiene el IAM
+# necesario vía Workload Identity, ver serviceaccount.yaml).
+apiVersion: v1
+kind: Secret
+metadata:
+  name: unogroup-app-solutionone-secret
+type: Opaque
+stringData:
+  SOLUTIONONE_USUARIO: "CHANGE_ME"
+  SOLUTIONONE_PASSWORD: "CHANGE_ME"
+---
+# unogroup-app/k8s/base/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ensambles   # un solo lugar para el namespace, no repetido por manifiesto
+resources:
+  - serviceaccount.yaml
+  - configmap.yaml
+  - secret.yaml
+  - deployment.yaml
+  - service.yaml
+labels:
+  - pairs:
+      app.kubernetes.io/name: unogroup-app
+      app.kubernetes.io/part-of: ensambles
+    includeSelectors: false
 ```
 
-**Diferencia deliberada entre ambos Deployments, visible en los manifiestos:** solo `unogroup-app` monta `unogroup-app-solutionone-secret` — confirma en Kubernetes lo que ya establecimos en el Diseño (§1.1) y en el diagrama de infraestructura: el Orquestador nunca tiene acceso a las credenciales de UnoGroup, ni siquiera a nivel de `ServiceAccount`/`Secret` montado. **Y, cambio de esta sesión, solo `orquestador-app` tiene el sidecar `cloud-sql-auth-proxy`** — `unogroup-app` quedó con un único contenedor, sin acceso a base de datos en absoluto.
+**Overlays por ambiente:**
 
-**Placeholders `TBD_*` en ambos manifiestos** — intencionales, no un descuido: registro de imágenes, tag, proyecto/región/instancia de Cloud SQL (solo en el manifiesto del Orquestador ahora) son valores que dependen de decisiones de infraestructura (§8) o de CI/CD que todavía no se han tomado en esta conversación.
+```yaml
+# unogroup-app/k8s/overlays/local/kustomization.yaml — clúster local (kind/minikube)
+resources: [../../base]
+patches:
+  - path: deployment-patch.yaml   # replicas: 1, recursos más chicos, imagePullPolicy: IfNotPresent
+  - path: configmap-patch.yaml    # LOG_LEVEL_APP=DEBUG, logs de Feign en "full"
+images:
+  - name: unogroup-app
+    newTag: local   # build local: `docker build -t unogroup-app:local .`
+
+# unogroup-app/k8s/overlays/prod/kustomization.yaml — GKE
+resources: [../../base]
+patches:
+  - path: deployment-patch.yaml       # replicas: 3, recursos de prod, imagePullPolicy: Always
+  - path: serviceaccount-patch.yaml   # anotación iam.gke.io/gcp-service-account (Workload Identity)
+  - path: configmap-patch.yaml        # punto único para SOLUTIONONE_BASE_URL si prod usa un host distinto
+images:
+  - name: unogroup-app
+    newName: TBD_REGISTRY/unogroup-app   # TODO: path real de Artifact Registry
+    newTag: TBD_TAG                       # TODO: SHA/tag del build en CI
+```
+
+**Diferencia deliberada, visible en el manifiesto:** solo `unogroup-app` monta `unogroup-app-solutionone-secret` y su `ServiceAccount` es distinto del Orquestador — confirma en Kubernetes lo que ya establecimos en el Diseño (§1.1): el Orquestador nunca tiene acceso a las credenciales de UnoGroup. **Sin sidecar `cloud-sql-auth-proxy`** — `unogroup-app` queda con un único contenedor, sin acceso a base de datos en absoluto (a diferencia de `orquestador-app`, §7.2).
+
+**Placeholders `TBD_*` restantes, ahora aislados en `overlays/prod`** (ya no mezclados con el resto del Deployment): `newName`/`newTag` de imagen en `overlays/prod/kustomization.yaml`, el `TBD_PROJECT_ID` de la anotación de Workload Identity en `overlays/prod/serviceaccount-patch.yaml`, y las credenciales `CHANGE_ME` de `base/secret.yaml` — todos dependen de decisiones de infraestructura (§8) o de CI/CD que todavía no se han tomado.
+
+**Comandos de referencia** (build local, aplicar overlay, port-forward, redeploy) — ver `README.md` del repositorio, que los documenta con el detalle operativo completo; no se duplican aquí para no tener dos fuentes de verdad sobre el mismo comando.
 
 ---
 
 # 8. Infraestructura Terraform — nota de alcance
 
-**Este documento no cubre la infraestructura gestionada por Terraform** — se documentará por separado. Acotación de alcance, confirmada en esta sesión:
+**Este documento no cubre la infraestructura gestionada por Terraform** — se documentará por separado. Acotación de alcance:
 
 - **El clúster de GKE y la instancia de Cloud SQL (MySQL) ya existen** — no son recursos que este proyecto deba crear. Lo que sí falta a nivel de infraestructura para este proyecto específico: base de datos y usuario nuevos dentro de la instancia existente, namespace de Kubernetes, los `ServiceAccount`/Workload Identity referenciados en §7.2/§7.3, tópico y suscripción de Pub/Sub, y las entradas de Secret Manager para credenciales de UnoGroup y de base de datos (sincronizadas hacia los `Secret` de Kubernetes que consumen los manifiestos de §7).
 
 ---
 
-# 9. Pendientes que afectan la implementación
+# 9. Trabajo pendiente
 
-| # | Pendiente | Afecta | Estado |
-|---|---|---|---|
-| ~~1~~ | ~~Distinción `UP05`/`UP06` cuando el payload de WMS no lo indica~~ | `orquestador-app/messaging` | **Resuelto** — nuevo atributo `tipo_evento` en el mensaje de Pub/Sub (ver Diseño §9.6 F12) |
-| ~~2~~ | ~~`WMS-Order Provider` — ¿conoce el flujo (ASSE/ENSA) al momento de crear la orden?~~ | `orquestador-app/messaging` | **Resuelto** — no lo conoce, y estructuralmente no puede: el flujo se determina por línea (`orderdetails[].ext_udf_str10`), después de consultar el shipment. `flujo` deja de ser atributo requerido para `origen=wms` (ver Diseño §9.6 F11, §2.5) |
-| 3 | Schema del mensaje de Tracking/Beetrack (actualización de entrega) | `orquestador-app/messaging/mapper` | Abierto — ver Diseño §9.6 F13 |
-| ~~4~~ | ~~¿El `202` de `unogroup-app` se responde antes o después del ciclo de reintentos hacia Solution One?~~ | `unogroup-app/controller` | **Resuelto** — comunicación asíncrona: siempre antes, con resultado reportado después por callback (ver §1.4.6, Diseño §2.4) |
-| ~~5~~ | ~~Body binario hacia Solution One — ¿requiere `Encoder` de Feign personalizado?~~ | `unogroup-app/client` | **Resuelto** — sí, y `Content-Type: application/json` funciona (probado contra ambiente de prueba real, ver §6) |
-| 6 | Intervalo exacto del job de reconciliación | `orquestador-app/reconciliation` | Abierto — ver Diseño §9.6 F7 |
-| 7 | Estructura real de carpetas / nombre de campo / longitud de `external_reference` | `unogroup-app/client`, `unogroup-app/mapper` | **Parcialmente reabierto (2026-07-15)** — carpeta: `assembly/{fecha}/...` funcionó en una prueba real pero producción respondió `403 permission denied` en la misma ruta; vigente ahora `/siman/create|update/{fecha}/...` (ver Diseño §6.4.3, C3). `customer_*` y longitud 32 de `external_reference` siguen resueltos sin cambios — ver Diseño §6.7, §9.6 C3/C4/C5 |
-| 8 | Autenticación de los endpoints internos de notificación y callback (hoy deshabilitada en ambos sentidos) | `unogroup-app/controller`, `orquestador-app/controller` | Abierto — ver Diseño §9.6 F8 (ampliado esta sesión, ahora cubre ambos endpoints) |
-| 9 | Valores reales de imagen/registro, proyecto/región/instancia Cloud SQL, nombres de Secret/ConfigMap | `k8s/deployment.yaml` (ambas apps) | Nuevo — placeholders `TBD_*` en §7, depende de infraestructura (§8) |
-| 10 | Cómo detecta la reconciliación la zona 3 (UnoGroup procesó pero el callback se perdió) — UnoGroup ya no tiene base de datos donde dejar rastro | `orquestador-app/reconciliation` | Nuevo, esta sesión — ver Diseño §9.6 F16 |
-| ~~11~~ | ~~¿El cliente de callback (`unogroup-app/callback`) reintenta si la llamada al Orquestador falla, o se deja todo en manos de la reconciliación (ítem 10)?~~ | `unogroup-app/callback` | **Resuelto** — 5 intentos, backoff exponencial desde 500ms (×2, ≈15.5s total); agotados los intentos, se registra en logs ERROR y queda en manos de la reconciliación (ver §1.4.8) |
-| ~~12~~ | ~~`ensambles-common` como dependencia de `unogroup-app` solo para reutilizar enums — evaluar si conviene separarlos en un módulo aún más pequeño~~ | `unogroup-app/pom.xml` | **Resuelto** — se eliminó `ensambles-common` por completo (esta sesión); cada app define sus propios enums locales, ver §1.1/§3 |
-| ~~13~~ | ~~Valores de `tipo_evento` para eventos de Guías Manuales (CARM/TARM/DARM) — solo se confirmó para WMS~~ | `orquestador-app/messaging` | **Resuelto** — `creacion` / `actualizacion` (ver Diseño §4.2.1) |
-| ~~14~~ | ~~El nombre de archivo para actualizaciones — ¿usa prefijo `update`?~~ | `unogroup-app/client` (`SolutionOneFileNaming`) | **Resuelto (decisión de diseño)** — sí, por simetría con `create`. Sin ejemplo real de actualización todavía — ver Diseño §9.6 F19 |
-| 15 | **Nuevo:** `EventoGuiasMapper` — comportamiento exacto si `items[]` viene vacío o con SKUs duplicados dentro del mismo evento (¿error 400, o se procesa lo válido y se reporta lo demás?) | `orquestador-app/messaging/mapper` | Nuevo, esta sesión — sin precedente en el diseño de WMS (ASSE/ENSA no tienen este caso, siempre 1 sku por evento) |
-| ~~15~~ | ~~El nombre de archivo para actualizaciones — ¿incluye `sku`?~~ | `unogroup-app/client` (`SolutionOneFileNaming`) | **Resuelto (decisión de diseño)** — sí, siempre. Ver Diseño §9.6 F20 |
-| 16 | **Nuevo, esta sesión:** autenticación y política de reintento de `WmsShipmentClient` hacia `GET /wms/dw/v1/shipment/get-shipment/{whseId}/{externOrderKey}` — sin definir | `orquestador-app/client/wms` | Nuevo — ver §1.4.4c |
-| 17 | **Nuevo, esta sesión:** fuente exacta de `tracking_order_time` — `adddate` vs. `orderdate` de `WmsShipmentDetail`, ambos presentes en el ejemplo real con valores distintos | `orquestador-app/enrichment` | Nuevo, dejado abierto a propósito — ver Diseño §9.1 A6 |
-| 18 | **Nuevo, esta sesión:** fuente exacta de `tracking_dispatched_time`/`tracking_delivered_time` — campo `fecha` del payload crudo (UP05/UP06, formato no ISO 8601) vs. hora de recepción del evento en el Orquestador | `orquestador-app/enrichment` | Nuevo, dejado abierto a propósito — ver Diseño §9.1 A7 |
-| 19 | **Nuevo, esta sesión:** ¿`bcompany` o `ccompany` para `customer_name`? Ambos presentes en `WmsShipmentDetail`, mismo valor en el ejemplo real — sin confirmar si siempre coinciden | `orquestador-app/enrichment` | Nuevo — ver Diseño §4.1 |
-| ~~20~~ | ~~¿`orquestador-app` y `unogroup-app` viven en un solo proyecto Maven multi-módulo o en repositorios separados?~~ | Toda la sección §1, §6, §7.1 | **Resuelto (reconfirmado en esta reconciliación)** — dos repositorios Git independientes, sin `pom.xml` padre ni módulo común (ver §1.1) |
-| 21 | Pipelines de CI/CD — con dos repositorios separados, hace falta un pipeline por repositorio (build, test, imagen, tag) en vez de uno que compile ambos módulos a la vez | `orquestador-app/Dockerfile`, `unogroup-app/Dockerfile`, §7 | Abierto — no se ha definido la herramienta ni la configuración de CI/CD todavía |
+Lo que sigue son los puntos que hoy afectan el código y siguen sin cerrar. El historial completo de cómo se llegó a este estado — hallazgos de auditoría, correcciones sobre versiones previas de este documento, y los ítems ya resueltos — vive en `HUENSA-001_Bitacora_Decisiones_Implementacion_Modulo_Integracion_Ensamble.md` §4. Las preguntas que dependen de un tercero o de una decisión de negocio/arquitectura (no solo de escribir código) están en la Bitácora de Diseño, Índice Maestro de Preguntas Abiertas (`F1`–`F20`, `A1`–`A7`, `C1`–`C7`).
+
+1. Construir el ruteo real de `actualizacion` para `origen=guias` (§1.4.1) — hoy siempre se trata como creación.
+2. Construir el paquete `reconciliation` (§1.4.5) — hoy no existe en el código.
+3. Decidir si se agrega `url`/`metodoHttp` al contrato del callback o se relaja el `NOT NULL` de `ensamble_bitacora_partner` (§2, §3) — ver Diseño F8.
+4. `EventoGuiasMapper` — comportamiento exacto si `items[]` viene vacío o con SKUs duplicados dentro del mismo evento.
+5. Autenticación y política de reintento de `WmsShipmentClient` (§1.4.4c) — sin definir.
+6. Agregar validación `@Size` a los DTOs de entrada de `unogroup-app`, para reflejar los `maxLength` del contrato OpenAPI.
+7. Confirmar si `orquestador-app/k8s` migró a Kustomize igual que `unogroup-app/k8s` (§7.2, §7.3), o sigue con manifiestos planos.
+8. Valores reales de imagen/registro, proyecto/región/instancia de Cloud SQL, nombres de Secret/ConfigMap — placeholders `TBD_*` en ambos repositorios, depende de infraestructura (§8).
+9. Pipelines de CI/CD — un pipeline por repositorio (build, test, imagen, tag); no se ha definido herramienta ni configuración.
+10. Autenticación de los endpoints internos de notificación y callback (hoy deshabilitada en ambos sentidos) — ver Diseño F8.
+11. Cómo detecta la reconciliación la zona 3 (UnoGroup procesó pero el callback se perdió) — ver Diseño F16, bloqueado además por el ítem 2 de esta lista.
+12. Schema del mensaje de Tracking/Beetrack (actualización de entrega) — ver Diseño F13.
+13. Reflejar `respuesta_body`/`error_mensaje` de `ensamble_bitacora_partner` (§2, §3) en el diagrama entidad-relación de Requerimientos §2.6.1 — hoy documentadas aquí pero no en el ER aprobado.

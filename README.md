@@ -72,7 +72,7 @@ o como argumento de arranque:
 java -jar target/unogroup-app-1.0.0-SNAPSHOT.jar --ensambles.adapter.solutionone.usuario=xxx --ensambles.adapter.solutionone.password=yyy
 ```
 
-**Producción (GKE)**: vía el `Secret` `unogroup-app-solutionone-secret` referenciado en `k8s/deployment.yaml` (su creación real es responsabilidad de Terraform/infra, fuera de alcance de este repositorio).
+**Producción (GKE)**: vía el `Secret` `unogroup-app-solutionone-secret` referenciado en `k8s/base/deployment.yaml` (su creación real es responsabilidad de Terraform/infra, fuera de alcance de este repositorio).
 
 ## Probar los endpoints con `curl`
 
@@ -96,3 +96,129 @@ curl -X POST http://localhost:8081/internal/unogroup/solicitudes \
 ```
 
 Ambas responden `202 Accepted` de inmediato; el procesamiento real (llamada a Solution One + callback a `orquestador-app`) corre después, en background, y queda en los logs de la app.
+
+## Desplegar en Kubernetes con Kustomize
+
+Manifiestos en `k8s/`: una capa `base/` (Deployment, Service, ServiceAccount, ConfigMap, Secret placeholder) y overlays por ambiente en `k8s/overlays/` (`local`, `prod`). Ver `k8s/base/kustomization.yaml` y `k8s/overlays/*/kustomization.yaml` para el detalle de qué parchea cada uno.
+
+### Desplegar en Docker Desktop (local)
+
+Requiere Docker Desktop con Kubernetes habilitado (Settings → Kubernetes → Enable Kubernetes) y el contexto `docker-desktop` seleccionado.
+
+```bash
+# 0. Verificar que el contexto activo es docker-desktop
+kubectl config current-context
+# si no lo es:
+kubectl config use-context docker-desktop
+```
+
+```bash
+# 1. Construir la imagen local (mismo tag que referencia k8s/overlays/local)
+docker build -t unogroup-app:local .
+```
+
+```bash
+# 2. Crear el namespace (una sola vez; no lo gestiona kustomize)
+kubectl create namespace ensambles
+```
+
+```bash
+# 3. Aplicar el overlay local
+kubectl apply -k k8s/overlays/local
+```
+
+```bash
+# 4. Confirmar que el rollout terminó
+kubectl -n ensambles rollout status deployment/unogroup-app
+
+kubectl -n ensambles get pods,svc,deploy
+```
+
+### Port-forward y prueba de endpoints
+
+El `Service` (`svc-unogroup`) es `ClusterIP` — no accesible fuera del clúster, incluso en local. Para llegar a él desde la máquina host, usar `port-forward`:
+
+```bash
+# Deja este comando corriendo en su propia terminal (bloquea)
+kubectl -n ensambles port-forward svc/svc-unogroup 8081:80
+```
+
+En otra terminal:
+
+```bash
+curl -s http://localhost:8081/actuator/health/readiness
+curl -s http://localhost:8081/actuator/health/liveness
+
+curl -X POST http://localhost:8081/internal/unogroup/solicitudes \
+  -H "Content-Type: application/json" \
+  -d @docs/ejemplo_solicitud_creacion.json
+```
+
+Alternativa sin dejar un proceso bloqueando la terminal (Windows/PowerShell): lanzarlo en background y luego detenerlo por PID.
+
+```powershell
+$pf = Start-Process kubectl -ArgumentList "-n","ensambles","port-forward","svc/svc-unogroup","8081:80" -PassThru -NoNewWindow
+# ... usar curl / navegador contra localhost:8081 ...
+Stop-Process -Id $pf.Id -Force
+```
+
+### Logs y troubleshooting
+
+```bash
+# Logs del Deployment (todas las réplicas)
+kubectl -n ensambles logs deploy/unogroup-app --tail=100 -f
+
+# Describe si un pod no llega a Ready (eventos, probes fallidos, etc.)
+kubectl -n ensambles describe pod -l app=unogroup-app
+```
+
+Si el pod queda en `ImagePullBackOff`: falta reconstruir la imagen (`docker build -t unogroup-app:local .`) — el overlay local usa `imagePullPolicy: IfNotPresent` sobre la imagen ya cargada en el Docker de Docker Desktop, no la baja de ningún registry.
+
+Si cambian variables del `ConfigMap`/`Secret` después de un `apply`, hay que reiniciar el Deployment para que los pods las recojan (`envFrom` no es "live-reload"):
+
+```bash
+kubectl -n ensambles rollout restart deployment/unogroup-app
+```
+
+### Redesplegar tras un cambio de código
+
+```bash
+docker build -t unogroup-app:local .
+kubectl -n ensambles rollout restart deployment/unogroup-app
+kubectl -n ensambles rollout status deployment/unogroup-app
+```
+
+### Ver el YAML final sin aplicar (dry-run)
+
+Útil para revisar qué va a aplicar cualquiera de los overlays antes de correrlo contra un clúster real:
+
+```bash
+kubectl kustomize k8s/overlays/local
+kubectl kustomize k8s/overlays/prod
+```
+
+### Desmontar (local)
+
+```bash
+# Borra Deployment, Service, ServiceAccount, ConfigMap y Secret del overlay
+kubectl delete -k k8s/overlays/local
+
+# El namespace no lo gestiona kustomize — borrarlo aparte si ya no se necesita
+kubectl delete namespace ensambles
+```
+
+### Producción (GKE)
+
+El overlay `k8s/overlays/prod` **no** es para uso local — antes de aplicarlo hay que completar los placeholders:
+
+- `k8s/overlays/prod/kustomization.yaml` → `newName` con el path real de Artifact Registry (`images:`).
+- `k8s/overlays/prod/serviceaccount-patch.yaml` → `TBD_PROJECT_ID` en la anotación `iam.gke.io/gcp-service-account` (Workload Identity).
+- `k8s/base/secret.yaml` → reemplazar `CHANGE_ME` con las credenciales reales de Solution One por el mecanismo que use cada ambiente (Secret Manager / sealed-secrets / CI), nunca commiteadas en texto plano.
+
+Con eso resuelto, el despliegue contra un clúster GKE real sigue el mismo patrón que en local, apuntando `kubectl` al contexto correcto:
+
+```bash
+kubectl config use-context <contexto-del-clúster-gke>
+kubectl apply -k k8s/overlays/prod
+kubectl -n ensambles rollout status deployment/unogroup-app
+```

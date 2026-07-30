@@ -14,6 +14,8 @@ import lombok.Getter;
 public class IntentoRegistrado {
     private int numero;
     private String tipoPeticion;   // AUTH_TOKEN | UPLOAD_CREATE | UPLOAD_UPDATE
+    private String url;
+    private String metodoHttp;     // GET | POST
     private Integer codigoHttp;    // null si la llamada ni siquiera obtuvo respuesta (timeout/red)
     private int duracionMs;
     private boolean esReintento;
