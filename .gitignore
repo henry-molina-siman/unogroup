@@ -33,6 +33,7 @@ Thumbs.db
 .env.*
 *.pem
 *.key
+k8s/overlays/local/secret-patch.yaml
 
 # Java crash dumps
 hs_err_pid*

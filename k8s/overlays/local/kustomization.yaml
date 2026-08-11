@@ -10,7 +10,16 @@ resources:
 patches:
   - path: deployment-patch.yaml
   - path: configmap-patch.yaml
+  # Credenciales reales de Solution One para tu entorno local — no se
+  # commitea (ver .gitignore). Copiar secret-patch.yaml.example y editar
+  # antes del primer `kubectl apply -k` / scripts/deploy-local.ps1.
+  - path: secret-patch.yaml
 
 images:
   - name: unogroup-app
-    newTag: local   # build local: `docker build -t unogroup-app:local .`
+    # Tag por defecto para `kubectl apply -k` manual. Para desarrollo
+    # iterativo usar scripts/deploy-local.ps1, que construye con un tag
+    # único por build y lo aplica vía `kubectl set image` — evita servir
+    # una imagen vieja cuando el nodo ya tiene el tag `local` cacheado
+    # (imagePullPolicy: IfNotPresent no detecta que el contenido cambió).
+    newTag: local

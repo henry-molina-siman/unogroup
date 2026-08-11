@@ -17,3 +17,11 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+          # Arranque en local es más lento que en prod (DEBUG + recursos
+          # más ajustados): sin startupProbe, liveness mata el contenedor
+          # antes de que Tomcat termine de levantar (~60s+).
+          startupProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 18
